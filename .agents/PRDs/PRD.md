@@ -1,6 +1,7 @@
 # PRD — bi-ai-ui · AI BI Dashboard with Jev-Style Generative UI
 
-**Version:** 1.0 · **Date:** 2026-10-20 · **Status:** Draft approved for implementation
+**Version:** 1.1 · **Date:** 2026-10-20 · **Status:** Draft approved for implementation
+**v1.1 changelog:** frontend switched from Next.js to a React (Vite) SPA; `CopilotKit` now connects directly to the agent's FastAPI `/copilotkit` endpoint.
 
 ---
 
@@ -80,7 +81,7 @@ Core principles:
 ## 6. Core Architecture & Patterns
 
 ```
-Next.js :3000                      LangGraph Python agent :8123 (AG-UI)
+React SPA (Vite) :5173               LangGraph Python agent :8123 (AG-UI/FastAPI)
 ┌───────────────────────────────┐  ┌──────────────────────────────────┐
 │ CopilotSidebar (beUI chat)    │──▶ read_state: aggregates + DQ stats
 │  inline mini-cards            │  │ decide: N parallel decisions     │
@@ -94,13 +95,15 @@ Next.js :3000                      LangGraph Python agent :8123 (AG-UI)
 
 ```
 bi-ai-ui/
-├─ app/ (or src/app)         # canvas, A2UI renderer, sidebar, drawer
-│  ├─ components/catalog/    # 6 catalog components + registry.ts
-│  ├─ components/ui/         # beUI copies (chat, cards, table, alerts)
-│  ├─ lib/a2ui.ts            # Zod layout schema + validator + fallback
-│  └─ api/copilotkit/route.ts
+├─ web/                      # React SPA (Vite + TypeScript + Tailwind)
+│  └─ src/
+│     ├─ components/catalog/ # 6 catalog components + registry.ts
+│     ├─ components/ui/      # beUI copies (chat, cards, table, alerts)
+│     ├─ lib/a2ui.ts         # Zod layout schema + validator + fallback
+│     └─ App.tsx             # providers, canvas, sidebar, decision drawer
 ├─ agent/                    # LangGraph Python (CopilotKit scaffold)
 │  ├─ graph.py               # read_state → decide → layout → query → fill
+│  ├─ server.py              # FastAPI app + CORS + /copilotkit endpoint
 │  ├─ decision/client.py     # Choice/Noul/Score + fallback transports
 │  ├─ catalog.py             # pydantic mirror of component catalog
 │  ├─ queries.py             # SQL aggregates + filters
@@ -152,8 +155,8 @@ Same decision model for all question types by default; per-type override via env
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Frontend | Next.js (App Router) + TypeScript + Tailwind | scaffolded with `npx copilotkit@latest create` |
-| Chat/wiring | `@copilotkit/react-core`, `@copilotkit/react-ui` | pin exact versions (zod v3 peer-dep pin noted in docs) |
+| Frontend | React 19 (Vite) + TypeScript + Tailwind | `npm create vite@latest` SPA — no SSR, no Next.js |
+| Chat/wiring | `@copilotkit/react-core`, `@copilotkit/react-ui` | pin exact versions (zod v3 peer-dep pin noted in docs); `CopilotKit` provider's `runtimeUrl` points directly at the agent's `/copilotkit` FastAPI endpoint — no separate Node runtime |
 | UI kit | beUI copies (React + Tailwind + Motion) | Chat (Prompt Input, Message Bubble, Streaming Response, AI Sidebar), Card, Number Animation, Animated Alert, virtualized Table, theme toggle |
 | Charts | Recharts | wrapped in beUI Cards (check beUI `/charts` first) |
 | Agent | LangGraph Python + CopilotKit AG-UI endpoint, port 8123 | quickstart scaffold |
@@ -168,7 +171,7 @@ Same decision model for all question types by default; per-type override via env
 - **No auth (MVP)** — local demo only; live-URL deployment is post-MVP with gated access.
 - **Configuration:**
   - `agent/.env`: `OPENROUTER_API_KEY` (server-side only, gitignored), `DECISION_MODEL`, `TEXT_MODEL`, `DECISION_THRESHOLD=0.6`.
-  - No secrets in the frontend; the FE proxies through the Next.js CopilotKit runtime route.
+  - No secrets in the frontend; the SPA's `CopilotKit` provider connects directly to the agent's CopilotKit/AG-UI endpoint (FastAPI `CORSMiddleware` allowing the Vite dev origin `http://localhost:5173`).
 - **Security scope:** in — env hygiene; JSON-schema validation both ends; read-only parameterized SQL with whitelisted query templates. out — authN/Z, audit logs, PII controls (mock data contains no PII).
 
 ## 10. API Specification
@@ -202,7 +205,7 @@ Frontend re-validates; unknown type or invalid payload → fallback card + decis
 
 ### Agent ↔ frontend
 
-CopilotKit AG-UI endpoint (LangGraph, port 8123 pinned per quickstart). Shared state fields: `a2ui`, `decisions[]`, `status`. Investigate CTA = interactive component callback that sends a framed follow-up message to the agent.
+CopilotKit-compatible AG-UI endpoint exposed by the agent's FastAPI app (port 8123 pinned per quickstart); the SPA's `CopilotKit` provider points at `http://localhost:8123/copilotkit`. Shared state fields: `a2ui`, `decisions[]`, `status`. Investigate CTA = interactive component callback that sends a framed follow-up message to the agent.
 
 ## 11. Success Criteria
 
@@ -223,7 +226,7 @@ CopilotKit AG-UI endpoint (LangGraph, port 8123 pinned per quickstart). Shared s
 ### Phase 0 — Foundations (day 1)
 **Goal:** runnable skeleton.
 **Deliverables:**
-- [ ] `npx copilotkit@latest create` scaffold (Next.js + LangGraph Python)
+- [ ] Vite React SPA scaffold (`web/`) + CopilotKit packages wired to the agent's `/copilotkit` endpoint; LangGraph Python agent scaffold (`agent/`) per quickstart
 - [ ] git init + first commits
 - [ ] OpenRouter text-model smoke test wired
 - [ ] beUI components copied; theme tokens; dark/light toggle
@@ -288,7 +291,7 @@ CopilotKit AG-UI endpoint (LangGraph, port 8123 pinned per quickstart). Shared s
 ## 15. Appendix
 
 - **Blog (pattern + GDE steps):** https://www.copilotkit.ai/blog/jev-generative-ui
-- **CopilotKit quickstart:** https://docs.copilotkit.ai/coagents/quickstart/langgraph (`npx copilotkit@latest create`; port 8123 pin)
+- **CopilotKit quickstart (agent backend):** https://docs.copilotkit.ai/coagents/quickstart/langgraph (port 8123 pin; frontend is built as a React SPA per the "React (including React SPA)" frontend option, not the Next.js template)
 - **OpenRouter decision models:** https://openrouter.ai/models?output_modalities=decisions (27 models; `pplx-decider-flash-v1.2` canonical 20261016; alias `~perplexity/pplx-decider-flash-latest`)
 - **OpenRouter structured outputs:** https://openrouter.ai/docs/features/structured-outputs
 - **beUI:** https://beui.dev/components (copy-paste source; Motion + Tailwind; AI Agents section; Pro tier not needed)
