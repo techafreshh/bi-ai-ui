@@ -4,7 +4,9 @@ contract of exactly ``{"status": "ok"}``.
 
 Server shape mirrors the official CopilotKit langgraph-fastapi starter:
 ``load_dotenv`` before importing the graph, a module-level ``app`` built by
-``create_app``, and uvicorn in a ``main()`` guard.
+``create_app``, and uvicorn in a ``main()`` guard. Calling ``ensure_seeded``
+here keeps ``docker compose up`` a zero-step boot: the demo data set is
+generated deterministically on first start (no seed service, no manual step).
 """
 
 import logging
@@ -26,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import uvicorn
 
+import store
 from graph import build_graph
 
 logger = logging.getLogger("uvicorn.error")
@@ -39,8 +42,16 @@ def create_app() -> FastAPI:
     if not os.getenv("OPENROUTER_API_KEY"):
         logger.error(
             "OPENROUTER_API_KEY is not set (agent/.env). /health keeps serving; "
-            "chat requests will fail until a key is provided."
+            "the demo runs in deterministic local mode (seeded data, canned "
+            "narrative) until a key is provided."
         )
+    seed_counts = store.ensure_seeded()
+    logger.info("demo data seeded: %s", seed_counts)
+    logger.info(
+        "decision transport: %s (model %s)",
+        os.getenv("DECISION_TRANSPORT", "auto"),
+        os.getenv("DECISION_MODEL", "~perplexity/pplx-decider-flash-latest"),
+    )
 
     app = FastAPI(title="bi-ai-ui agent")
     app.add_middleware(
@@ -60,7 +71,8 @@ def create_app() -> FastAPI:
         app=app,
         agent=LangGraphAGUIAgent(
             name=AGENT_NAME,
-            description="bi-ai-ui chat agent: answers business questions in plain text.",
+            description="bi-ai-ui agent: composes dashboard views from a fixed "
+                        "catalog and answers business questions with data.",
             graph=build_graph(),
         ),
         path="/copilotkit",

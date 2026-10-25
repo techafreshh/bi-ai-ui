@@ -42,42 +42,6 @@ def test_missing_api_key_raises_clear_error_from_graph():
     graph.reset_text_model()
 
 
-def test_chat_without_key_returns_error_message_not_exception():
-    import asyncio
-
-    from langchain_core.messages import HumanMessage
-
-    env_without_key = {
-        k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"
-    }
-    graph.reset_text_model()
-    with mock.patch.dict(os.environ, env_without_key, clear=True):
-        result = asyncio.run(graph.chat({"messages": [HumanMessage(content="ping")]}))
-    graph.reset_text_model()
-    reply = result["messages"][0]
-    assert "OPENROUTER_API_KEY" in reply.content
-    assert reply.content.startswith("⚠")
-
-
-def test_chat_merges_streamed_chunks_into_one_message():
-    import asyncio
-
-    from langchain_core.messages import AIMessageChunk, HumanMessage
-
-    class FakeModel:
-        def __init__(self, chunks):
-            self._chunks = chunks
-
-        async def astream(self, _messages):
-            for c in self._chunks:
-                yield c
-
-    fake = FakeModel([AIMessageChunk(content="he"), AIMessageChunk(content="llo")])
-    with mock.patch.object(graph, "get_text_model", return_value=fake):
-        result = asyncio.run(graph.chat({"messages": [HumanMessage(content="ping")]}))
-    assert result["messages"][0].content == "hello"
-
-
 def test_server_reports_missing_key_and_still_serves_health(capsys):
     env_without_key = {
         k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"

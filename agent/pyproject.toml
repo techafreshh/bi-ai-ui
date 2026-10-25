@@ -24,7 +24,22 @@ dependencies = [
     # ag-ui-protocol>=0.1.21, so older pins are unsatisfiable.
     "ag-ui-protocol==0.1.22",
     "pytest>=8.0",
+    "ruff>=0.8,<1.0",
 ]
+
+[tool.ruff]
+line-length = 100
+
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# House pattern: load_dotenv (and sys.path setup for the CLI shim) must run
+# before the module imports that read the environment / import store.
+"server.py" = ["E402", "I001"]
+"scripts/generate_data.py" = ["E402"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
