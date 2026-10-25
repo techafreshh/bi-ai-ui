@@ -15,6 +15,7 @@ export default function Suggestions() {
     {
       suggestions: SUGGESTIONS,
       available: "before-first-message",
+      consumerAgentId: "bi_agent",
     },
     [],
   );

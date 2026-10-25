@@ -1,4 +1,5 @@
 import js from "@eslint/js";
+import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
@@ -15,5 +16,10 @@ export default tseslint.config(
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
     },
+  },
+  {
+    // Node-side tooling scripts (screenshot capture).
+    files: ["scripts/**/*.mjs"],
+    languageOptions: { globals: globals.node },
   },
 );

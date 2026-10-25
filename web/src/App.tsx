@@ -20,7 +20,9 @@ const biAgent = new HttpAgent({
   description: "bi-ai-ui agent: composes dashboard views from a fixed catalog.",
 });
 
-export default function App() {
+function Shell() {
+  // Needs the provider above it: hooks live in this inner component, not in
+  // App (a component cannot consume its own provider's context).
   const [drawerOpen, setDrawerOpen] = useState(false);
   const { state, send, isRunning } = useAgentState();
 
@@ -31,9 +33,7 @@ export default function App() {
   };
 
   return (
-    <CopilotKitProvider selfManagedAgents={{ [AGENT_ID]: biAgent }}>
-      <Suggestions />
-      <div className="flex h-full flex-col bg-slate-50 text-slate-900">
+    <div className="flex h-full flex-col bg-slate-50 text-slate-900">
         <header className="flex items-center gap-4 border-b border-slate-200 bg-white px-6 py-3">
           <div>
             <h1 className="text-lg font-semibold tracking-tight">bi-ai-ui</h1>
@@ -85,6 +85,14 @@ export default function App() {
           decisions={state.decisions}
         />
       </div>
+  );
+}
+
+export default function App() {
+  return (
+    <CopilotKitProvider selfManagedAgents={{ [AGENT_ID]: biAgent }}>
+      <Suggestions />
+      <Shell />
     </CopilotKitProvider>
   );
 }
