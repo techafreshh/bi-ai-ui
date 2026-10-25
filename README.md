@@ -149,7 +149,7 @@ With the stack up (`docker compose up`):
 python3 scripts/verify_demo.py
 ```
 
-…runs the PRD §11 checklist as 17 black-box probes over the real AG-UI wire —
+…runs the PRD §11 checklist as 18 black-box probes over the real AG-UI wire —
 health contract, SPA serving, CORS, Q3 (`kpi_row` + `line_chart` covering the
 exact Q3 range), churn (callout + 42-row cohort), data quality
 (`duplicates: fail`, `nulls: fail`, `freshness: ok`, Noul p = 0.94), ≥4
