@@ -166,7 +166,7 @@ Lint / typecheck / tests:
 
 ```bash
 cd web  && npm run lint && npm run typecheck && npm run test
-cd agent && uv sync && uv run pytest && uv run ruff check .   # host equivalent: ruff check agent
+cd agent && uv sync && uv run pytest && uv run ruff check .   # from the repo root: uvx ruff check agent
 ```
 
 ## Ports & configuration
@@ -195,9 +195,12 @@ python agent/scripts/generate_data.py --reset
   `copilotkit==0.1.96` (every run 500s; see the comment in
   `agent/pyproject.toml`). Both lockfiles (`web/package-lock.json`,
   `agent/uv.lock`) are committed so `docker compose up` is reproducible.
-- **`agent/requirements.txt`** — full pinned freeze of `uv.lock` for
-  pip-based environments (`pip install -r requirements.txt`); regenerate it
-  with the `uv export` command in its header whenever `uv.lock` changes.
+- **`agent/uv.lock` is the single source of truth** for the Python
+  environment — the Docker image installs with `uv sync --frozen` (exactly the
+  locked versions, no pip involved), and hosts use the same `uv sync`. Run
+  ruff inside `agent/` with `uv run ruff check .`, or from the repo root with
+  `uvx ruff check agent`; the ruff version itself is pinned in
+  `agent/pyproject.toml`.
 - **`ruff`** — pinned into `agent/pyproject.toml` (`>=0.8,<1.0`, currently
   0.17.2) so `uv sync --frozen` in the Docker image resolves the same lint
   toolchain the checks were run with.
@@ -210,10 +213,6 @@ cd web && npm install && npm run dev        # :5173
 
 # agent (demo mode works without a key; add OPENROUTER_API_KEY for live mode)
 cd agent && uv sync && uv run uvicorn server:app --port 8123
-
-# agent without uv: pip-based equivalent, same pins as uv.lock
-python3 -m venv agent/.venv && agent/.venv/bin/pip install -r agent/requirements.txt
-agent/.venv/bin/uvicorn server:app --app-dir agent --port 8123
 ```
 
 Screenshots (headless chromium against the running stack):
