@@ -40,5 +40,10 @@ export const componentRegistry = Object.fromEntries(
 ) as Record<A2UIComponentType, CatalogComponent>;
 
 export function getComponent(type: string): CatalogComponent | undefined {
+  // Own-property-only lookup: as a plain-object map, registry["toString"]
+  // and friends resolve to inherited Object.prototype members and would route
+  // an unknown type into the known-component path (crashing prop validation)
+  // instead of the fallback card. Object.hasOwn misses closed for them.
+  if (!Object.hasOwn(componentRegistry, type)) return undefined;
   return componentRegistry[type as A2UIComponentType];
 }

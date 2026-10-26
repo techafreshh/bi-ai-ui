@@ -144,8 +144,13 @@ export function validateComponentProps(
   type: string,
   props: unknown,
 ): ParseResult<unknown> {
-  const schema: z.ZodType | undefined =
-    componentPropsSchemas[type as A2UIComponentType];
+  // Own-property-only lookup (same hazard as the registry): a plain-object
+  // map resolves "toString"/"constructor"/"__proto__" off Object.prototype,
+  // and a truthy non-schema there would throw schema.safeParse instead of
+  // failing closed. Object.hasOwn rejects the whole inherited class.
+  const schema: z.ZodType | undefined = Object.hasOwn(componentPropsSchemas, type)
+    ? componentPropsSchemas[type as A2UIComponentType]
+    : undefined;
   if (!schema) {
     return { ok: false, error: `no schema for component type "${type}"` };
   }

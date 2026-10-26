@@ -257,4 +257,19 @@ describe("per-type prop schemas (prop names verbatim from catalog.py)", () => {
   it("fails closed for types the catalog does not know", () => {
     expect(validateComponentProps("bogus_chart", {})).toMatchObject({ ok: false });
   });
+
+  it("fails closed without throwing for prototype-chain type names", () => {
+    // Regression: the schema map is a plain object, so its inherited members
+    // (toString, constructor, ...) used to resolve as "schemas" and throw
+    // schema.safeParse is not a function instead of returning {ok: false}.
+    for (const type of [
+      "toString",
+      "valueOf",
+      "hasOwnProperty",
+      "constructor",
+      "__proto__",
+    ]) {
+      expect(validateComponentProps(type, {})).toMatchObject({ ok: false });
+    }
+  });
 });

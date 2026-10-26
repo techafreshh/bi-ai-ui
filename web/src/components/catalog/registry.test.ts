@@ -26,6 +26,22 @@ describe("componentRegistry", () => {
     expect(getComponent("")).toBeUndefined();
   });
 
+  it("misses closed for type strings naming Object.prototype members (prototype-chain poisoning)", () => {
+    // Regression: a plain-object registry inherits Object.prototype, so
+    // getComponent("toString") used to resolve truthy and take the
+    // known-component path — crashing prop validation instead of rendering
+    // the "Unknown component" fallback card (issue #11: never an error).
+    for (const type of [
+      "toString",
+      "valueOf",
+      "hasOwnProperty",
+      "constructor",
+      "__proto__",
+    ]) {
+      expect(getComponent(type)).toBeUndefined();
+    }
+  });
+
   it("makePlaceholder produces distinct components per type", () => {
     expect(makePlaceholder("kpi_row")).not.toBe(makePlaceholder("insight_text"));
   });

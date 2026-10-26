@@ -48,6 +48,20 @@ describe("A2UIRenderer (acceptance: unknown type degrades, never errors)", () =>
     expect(console.error).not.toHaveBeenCalled();
   });
 
+  it("renders the fallback card for type strings naming Object.prototype members, without crashing", () => {
+    // Regression (review finding): the registry/schema lookups are plain
+    // objects, so "toString" & co. used to resolve truthy and crash the
+    // render with schema.safeParse is not a function — exactly the error the
+    // issue forbids. Now they must degrade like any other unknown type.
+    render(<A2UIRenderer items={[{ type: "toString", props: {} }]} />);
+    expect(screen.getByText("Unknown component: toString")).toBeTruthy();
+    expect(screen.getByTestId("a2ui-fallback")).toBeTruthy();
+    expect(console.error).toHaveBeenCalledTimes(1);
+    expect(console.error).toHaveBeenCalledWith(
+      '[a2ui] unknown component type "toString" — rendered fallback card',
+    );
+  });
+
   it('renders "Invalid component: <type>" once for a known type with invalid props', () => {
     render(<A2UIRenderer items={[{ type: "kpi_row", props: {} }]} />);
     expect(screen.getByText("Invalid component: kpi_row")).toBeTruthy();
