@@ -13,7 +13,6 @@ test posts to the real `/copilotkit` app (server.py) 100 times.
 import json
 import uuid
 
-import pytest
 from fastapi.testclient import TestClient
 
 import catalog
