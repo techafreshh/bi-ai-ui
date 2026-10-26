@@ -180,6 +180,24 @@ def test_churn_delta_contract(seeded_db):
     assert 0 < result["current"] < 1
 
 
+def test_latest_event_date_contract(seeded_db):
+    """Latest observed event day across all three event tables = the seed's
+    horizon 2026-09-30 — the deterministic data_end anchor read_state
+    resolves query windows against."""
+    assert queries.latest_event_date() == "2026-09-30"
+
+
+def test_latest_event_date_returns_none_on_eventless_db(tmp_path, monkeypatch):
+    """A DB with the schema but zero events reads as None (the fallback to
+    the wall-clock anchor is read_state's decision, not the query layer's)."""
+    from quality_fixture import build_fixture
+
+    db_path = tmp_path / "eventless.db"
+    build_fixture(db_path, usage_rows=[])
+    monkeypatch.setattr(db, "DEFAULT_DB_PATH", db_path)
+    assert queries.latest_event_date() is None
+
+
 def test_sql_injection_safety(seeded_db):
     """Acceptance: attempted injection values passed as parameters raise
     ValueError (never reach SQL), and the accounts table still exists with

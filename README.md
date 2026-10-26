@@ -12,11 +12,11 @@ markup. Full product spec: [.agents/PRDs/PRD.md](.agents/PRDs/PRD.md).
 React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
 ┌─────────────────────────┐  AG-UI SSE  ┌───────────────────────┐  OpenAI-compatible
 │ CopilotKit v2 provider  │ ──────────▶ │ POST /copilotkit      │ ─────────────▶
-│ HttpAgent · CopilotSidebar│◀──────────│ single-node chat graph│   text model
-└─────────────────────────┘ token deltas │ (TEXT_MESSAGE_* out)  │ ◀─────────────
-                                         └───────────┬───────────┘ (key: agent/.env)
-                                                     │
-                                                     ▼
+│ HttpAgent · CopilotSidebar│◀──────────│ five-node agent graph │   text model (fill)
+└─────────────────────────┘ token deltas │ read_state → decide   │ ◀─── decisions ──┐
+         ▲ shared state                  │ → layout → query → fill│                 │
+         └── a2ui · decisions · status   └───────────┬───────────┘   decisions-modality │
+                                                     ▼                (key: agent/.env)
                                       ┌───────────────────────────┐
                                       │ SQLite — data/app.db      │
                                       │ deterministic seeded mock │
@@ -27,8 +27,18 @@ React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
 - The browser connects directly to the FastAPI agent (no Node runtime in
   between, PRD v1.1); the agent's CORS allows only the Vite dev origin
   (`agent/server.py`).
-- The agent is a single LangGraph `chat` node streaming an OpenRouter
-  text model as an OpenAI-compatible endpoint (`agent/graph.py`).
+- The agent is a five-node LangGraph graph (`agent/graph.py`):
+  `read_state` loads window-scoped KPI aggregates + data-quality stats from
+  SQLite, `decide` fans a ≤7-question catalog set out through the
+  probabilistic `DecisionClient` (OpenRouter decisions-modality with a chat
+  fallback chain, `agent/decision/`; a deterministic heuristic transport
+  when no key is configured), `layout` builds the A2UI draft from
+  above-threshold picks and parse-asserts it through the Pydantic catalog
+  (`agent/catalog.py`), `query` runs slot-scoped SQL for the surviving
+  components, and `fill` makes exactly one streamed text-model call writing
+  the narrative into `slotCopy`. Shared state — `a2ui`, `decisions[]`,
+  `status` — is streamed to the client on every node transition; the final
+  text reply is the fill summary.
 - Mock B2B-SaaS data lives in `data/app.db` (gitignored), generated
   deterministically by `python agent/scripts/generate_data.py`: ~5–8k
   accounts plus 24 months (2024-10-01 → 2026-09-30) of daily
@@ -58,8 +68,10 @@ docker compose up
 - SPA: http://localhost:5173 — open it and chat in the sidebar ("ping").
 - Agent: http://localhost:8123 — `GET /health` returns exactly `{"status": "ok"}`.
 - Without an OpenRouter key in `agent/.env`, both services still boot and
-  `/health` keeps returning 200; only chat requests fail (the agent log names
-  the missing variable).
+  `/health` keeps returning 200; the graph still runs end-to-end — the
+  decider falls back to its deterministic heuristic transport and fill
+  writes KPI-grounded copy instead of model text (boot also self-seeds
+  `data/app.db` in the background when it is missing).
 
 ## Environment
 
