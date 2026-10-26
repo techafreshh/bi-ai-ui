@@ -306,7 +306,7 @@ def test_all_subthreshold_picks_fall_back_to_default_insight(seeded_db, monkeypa
     assert [item["type"] for item in final_a2ui["items"]] == ["insight_text"]
     # The layout shape equals the catalog fallback exactly — fill's copy in
     # slotCopy is the only allowed delta.
-    fallback = catalog._fallback_layout().model_dump()
+    fallback = catalog.fallback_layout().model_dump()
     assert final_a2ui["items"] == fallback["items"]
     assert final_a2ui["v"] == fallback["v"]
     assert final_a2ui["layout"] == fallback["layout"]

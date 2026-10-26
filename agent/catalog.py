@@ -236,9 +236,11 @@ FALLBACK_BODY = (
 )
 
 
-def _fallback_layout():
+def fallback_layout():
     """The single-insight_text default layout (issue #7 acceptance clause 3):
-    what filter_layout returns when the threshold cut empties the canvas."""
+    what filter_layout returns when the threshold cut empties the canvas.
+    Public since issue #18: the graph's layout/fill nodes and the off-catalog
+    safety tests consume it as the module's fallback surface."""
     return A2UILayout(
         items=[
             InsightTextItem(
@@ -299,7 +301,7 @@ def filter_layout(items, probs, threshold):
         item for item in validated.items if probs.get(item.type, 0.0) >= threshold
     ]
     if not kept:
-        return _fallback_layout()
+        return fallback_layout()
     return A2UILayout(
         v=validated.v, layout=validated.layout, items=kept, slotCopy=validated.slotCopy
     )
