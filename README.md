@@ -32,7 +32,9 @@ React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
   SQLite, `decide` fans a ≤7-question catalog set out through the
   probabilistic `DecisionClient` (OpenRouter decisions-modality with a chat
   fallback chain, `agent/decision/`; a deterministic heuristic transport
-  when no key is configured), `layout` builds the A2UI draft from
+  when no key is configured; off-catalog queries (no data domain) are
+  answered by the deterministic guard transport without consulting the
+  wired model (issue #18)), `layout` builds the A2UI draft from
   above-threshold picks and parse-asserts it through the Pydantic catalog
   (`agent/catalog.py`), `query` runs slot-scoped SQL for the surviving
   components, and `fill` makes exactly one streamed text-model call writing

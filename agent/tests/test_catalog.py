@@ -82,6 +82,37 @@ def test_unknown_type_error_names_type():
     assert "unicorn" in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    "hostile_type", ["dragon", "chart", "table", "GRID", "kpi rows", ""]
+)
+def test_off_catalog_type_puns_are_rejected(hostile_type):
+    """Issue #18: type tags that pun on catalog words — a substring
+    ("chart"/"table"), a case variant ("GRID"), a plural phrase, an empty
+    string — all fail the discriminated union. Nothing outside the fixed
+    6-tag set can ever validate, so an off-catalog ask cannot render an
+    unknown component even from a hostile payload."""
+    with pytest.raises(ValidationError):
+        catalog.A2UILayout.model_validate(
+            {"items": [{"type": hostile_type, "props": {}}]}
+        )
+
+
+def test_fallback_layout_contract():
+    """Issue #18: fallback_layout() — public since the graph's layout/fill
+    nodes consume it as the fallback surface — returns exactly the default
+    view: v=1, layout 'grid', one insight_text item carrying the module
+    fallback copy (titled, non-empty body), and its dump re-validates."""
+    result = catalog.fallback_layout()
+    assert result.v == 1
+    assert result.layout == "grid"
+    assert [item.type for item in result.items] == ["insight_text"]
+    assert len(result.items) == 1
+    assert result.items[0].props.title == catalog.FALLBACK_TITLE
+    assert result.items[0].props.body == catalog.FALLBACK_BODY
+    assert result.items[0].props.body  # non-empty by contract
+    assert catalog.A2UILayout.model_validate(result.model_dump()) == result
+
+
 def test_filter_layout_keeps_only_above_threshold():
     """Acceptance clause 3 (keep branch): given items (kpi_row, p=0.91) and
     (data_table, p=0.31) with threshold 0.6, only the kpi_row remains, its

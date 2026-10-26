@@ -24,7 +24,9 @@ fields stream to the client as AG-UI STATE_SNAPSHOTs on every node exit:
   `DecisionClient.decide`, stamping each streamed entry with `id`, `type`,
   `probabilities`, `pick`, `model` and per-call `latency_ms`. Transport
   failures degrade to a fresh heuristic run, so `decisions` always carries
-  1..7 entries.
+  1..7 entries. Off-catalog queries (no data domain) are answered by the
+  deterministic guard transport without consulting the wired model (issue
+  #18), so their threshold cut empties into the insight fallback.
 * `layout` builds a complete draft of every catalog component from the
   snapshot, cuts it with `catalog.filter_layout` at DECISION_THRESHOLD and
   parse-asserts the result through `A2UILayout`; nothing surviving falls
