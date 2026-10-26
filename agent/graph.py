@@ -20,10 +20,15 @@ state to CopilotKit (issue #10).
     catalog.filter_layout(items, probs, threshold); nothing surviving falls
     back to the insight_text-only default view. The emitted `a2ui` is
     parse-asserted through A2UILayout inside this node (issue acceptance
-    clause 4) — an invalid draft never reaches the frontend.
+    clause 4) — an invalid draft never reaches the frontend. Investigate
+    follow-ups (issue #16, messages starting with the fixed
+    INVESTIGATE_PREFIX) bypass the cut: the CTA-authored drill-down layout
+    (filtered cohort data_table + titled insight_text) replaces the canvas.
   * query — slot-scoped SQL for the surviving slots (window-scoped DQ
     checks, churn cohort rows, churn delta), merged back into `a2ui` and
-    re-validated before storing.
+    re-validated before storing. One churn_driver run (issue #16) backs the
+    callout's cause story, the cohort table rows, and — on investigate runs
+    — the drill-down table's row-level detail and insight body.
   * fill — exactly ONE text-model call writing the narrative into
     `a2ui.slotCopy` ("kpis.title", "line_chart.title", "insight_text.body",
     "summary"), streamed via model.astream so token deltas still reach the
@@ -86,6 +91,34 @@ STATUSES = {
     "query": "querying",
     "fill": "done",
 }
+
+# Issue #16 golden path B: the Investigate CTA the churn callout carries and
+# the fixed prefix of the follow-up message that CTA triggers. The cta slot
+# is the machine id (catalog.VarianceCalloutProps.cta; the frontend
+# humanizes it for the button label), the prefix is a contract the frontend's
+# useInvestigate hook mirrors verbatim in web/src/hooks/useInvestigate.tsx.
+INVESTIGATE_CTA = "investigate_churn_cohort"
+INVESTIGATE_PREFIX = "[investigate] churn cohort"
+
+# The drill-down data_table's columns — exactly the row-level keys
+# churn_cohort_detail returns (VirtualTable cells look up row[column]).
+_INVESTIGATE_COLUMNS = [
+    "segment",
+    "plan",
+    "mrr",
+    "tenure_months",
+    "cancelled_on",
+    "repriced",
+]
+
+
+def _is_investigate(text) -> bool:
+    """True when the user's message is the Investigate follow-up: the fixed
+    INVESTIGATE_PREFIX (CTA framing), any leading whitespace tolerated and
+    the match case-insensitive. Non-string input reads False."""
+    return isinstance(text, str) and text.lstrip().lower().startswith(
+        INVESTIGATE_PREFIX
+    )
 
 
 class AgentState(TypedDict):
@@ -244,7 +277,12 @@ async def read_state(state: AgentState) -> dict:
     degrades: the snapshot stays JSON-shaped with `degraded: True` and the
     window falls back to the wall-clock anchor's latest complete quarter."""
     user_text = _last_user_text(state.get("messages") or [])
-    snapshot: dict = {"query": user_text, "degraded": False, "data_end": None}
+    snapshot: dict = {
+        "query": user_text,
+        "degraded": False,
+        "data_end": None,
+        "investigate": _is_investigate(user_text),
+    }
 
     data_end = None
     window = None
@@ -269,6 +307,7 @@ async def read_state(state: AgentState) -> dict:
         )
         snapshot["dq_checks"] = quality.run_checks()
         snapshot["churn"] = queries.churn_delta(end)
+        snapshot["churn_driver"] = queries.churn_driver((start, end), data_end=data_end)
         # Decision context used the trailing default DQ scope; the display
         # window can only match it by coincidence, which is why `query`
         # re-runs window-scoped SQL for the surviving slots.
@@ -285,7 +324,10 @@ def _pick(answer) -> str | float:
     """The decider's pick for one answer: the argmax option for choice
     (first option wins ties — probabilities arrive in question-option
     order, so a strict `>` keeps the earlier one), "yes"/"no" for noul
-    (yes when p >= 0.5), the score itself for score questions."""
+    (yes when p >= 0.5), the score itself for score questions. The
+    real-change noul never flows through here untreated — the decide node
+    reshapes it into the {real, data_problem} dict whose pick is the argmax
+    KEY (see _real_change_probabilities)."""
     probabilities = answer.probabilities
     if isinstance(probabilities, dict):
         best_option, best_value = None, None
@@ -296,6 +338,28 @@ def _pick(answer) -> str | float:
     if answer.type == "score":
         return float(probabilities)
     return "yes" if float(probabilities) >= 0.5 else "no"
+
+
+def _real_change_probabilities(answer):
+    """Issue #16 acceptance: the real_change_vs_data_problem noul ships its
+    probabilities as a {"real", "data_problem"} dict summing to 1, not the
+    DecisionClient's scalar p(yes). A scalar answer is re-stamped as
+    {real: p, data_problem: 1-p} (4-decimal rounding keeps the sum within
+    ~4e-4 of 1.0) and the pick becomes the argmax KEY along the same 0.5
+    line _pick uses. Any other shape (or question id) passes through
+    untouched — the reshaping is a presentation concern over the existing
+    #8 noul contract, never a parser change."""
+    probabilities = answer.probabilities
+    if (
+        answer.id != questions.REAL_CHANGE_QUESTION_ID
+        or not isinstance(probabilities, (int, float))
+        or isinstance(probabilities, bool)
+    ):
+        return probabilities, _pick(answer)
+    scalar = round(float(probabilities), 4)
+    reshaped = {"real": scalar, "data_problem": round(1.0 - scalar, 4)}
+    pick = "real" if scalar >= 0.5 else "data_problem"
+    return reshaped, pick
 
 
 async def _decide_with(transport, threshold, question_set):
@@ -341,18 +405,20 @@ async def decide(state: AgentState) -> dict:
 
     elapsed_ms = timed.timing_by_id()
     model = _model_label(timed)
-    decisions = [
-        {
-            "id": answer.id,
-            "type": answer.type,
-            "probabilities": answer.probabilities,
-            "pick": _pick(answer),
-            "model": model,
-            "latency_ms": round(elapsed_ms.get(answer.id, 0.0), 2),
-            "above_threshold": answer.above_threshold,
-        }
-        for answer in answers
-    ]
+    decisions = []
+    for answer in answers:
+        probabilities, pick = _real_change_probabilities(answer)
+        decisions.append(
+            {
+                "id": answer.id,
+                "type": answer.type,
+                "probabilities": probabilities,
+                "pick": pick,
+                "model": model,
+                "latency_ms": round(elapsed_ms.get(answer.id, 0.0), 2),
+                "above_threshold": answer.above_threshold,
+            }
+        )
     return {"decisions": decisions, "status": STATUSES["decide"]}
 
 
@@ -458,12 +524,19 @@ def _draft_items(snapshot):
                 "metric": "churn rate",
                 "delta": round(_number(churn.get("delta")), 4),
                 "baseline": f"trailing 6-month average {baseline:.2%}",
+                # Issue #16: the data-grounded cause and the Investigate CTA
+                # (None off-spike — no invented narrative, no dead button).
+                "cause": _churn_cause(_snapshot_dict(snapshot, "churn_driver")),
+                "cta": INVESTIGATE_CTA,
             },
         },
         {
             "type": "data_table",
             "props": {
-                "columns": ["Segment", "MRR", "Tenure (months)", "Plan"],
+                # Row keys, not display labels: VirtualTable resolves cells
+                # by row[column], so display-case columns would render the
+                # placeholder for every real row (issue #16).
+                "columns": ["segment", "mrr", "tenure_months", "plan"],
                 "rows": [],
             },
         },
@@ -497,6 +570,101 @@ def _catalog_probabilities(decisions):
     return {}
 
 
+def _churn_cause(driver):
+    """The variance callout's cause line (issue #16), or None when the data
+    does not prove it. The claim is data-grounded: it is spoken ONLY when
+    at least half of the cohort's cancelled accounts carry the repricing
+    signature (an in-window upgrade before cancelling) — off-spike windows
+    get no invented narrative. Fail-safe on a malformed/absent driver (a
+    degraded snapshot reads no driver at all)."""
+    if not isinstance(driver, dict):
+        return None
+    cancelled, repriced = driver.get("cancelled"), driver.get("repriced")
+    if (
+        not isinstance(cancelled, int)
+        or isinstance(cancelled, bool)
+        or not isinstance(repriced, int)
+        or isinstance(repriced, bool)
+        or cancelled <= 0
+    ):
+        return None
+    if repriced / cancelled < 0.5:
+        return None
+    cause = (
+        f"Driven by the pricing change: {repriced} of {cancelled} cancelled "
+        "accounts had adopted a new plan in the days before cancelling."
+    )
+    segment, share = driver.get("dominant_segment"), driver.get("dominant_share")
+    if isinstance(segment, str) and segment and isinstance(share, (int, float)):
+        cause += f" The churn cohort is {share:.0%} {segment}-segment."
+    return cause
+
+
+def _investigate_body(driver):
+    """The drill-down insight_text's narrative (issue #16): what the cohort
+    table below it shows, grounded in the driver facts — counts, window,
+    repriced share and dominant segment. A cohort with no rows states that
+    truthfully instead of narrating an empty table."""
+    if not isinstance(driver, dict):
+        return "No churn cohort data is available for this window."
+    rows = driver.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return "No churn cohort rows matched this window."
+    cancelled, repriced = driver.get("cancelled"), driver.get("repriced")
+    cohort_start, cohort_end = (
+        driver.get("cohort_start"),
+        driver.get("cohort_end"),
+    )
+    body = (
+        f"Churn cohort {cohort_start}..{cohort_end}: {cancelled} cancelled "
+        f"accounts, {repriced} of them after adopting a new plan."
+    )
+    segment, share = driver.get("dominant_segment"), driver.get("dominant_share")
+    if isinstance(segment, str) and segment and isinstance(share, (int, float)):
+        body += f" {share:.0%} of the visible rows are {segment}-segment."
+    return body
+
+
+def _investigate_items(snapshot):
+    """The drill-down's two catalog items (issue #16): a data_table whose
+    columns are exactly churn_cohort_detail's row keys with a segment filter
+    (VirtualTable looks cells up by row[column]), and an insight_text TITLED
+    with the cohort — lowercase 'churn cohort' plus the dominant segment, so
+    the refreshed a2ui visibly references the cohort it investigates.
+    Rows/body stay empty here: the query node fills them per-slot."""
+    driver = _snapshot_dict(snapshot, "churn_driver")
+    segment = driver.get("dominant_segment")
+    if not isinstance(segment, str) or not segment:
+        segment = "Churn"
+    return [
+        {
+            "type": "data_table",
+            "props": {
+                "columns": _INVESTIGATE_COLUMNS,
+                "rows": [],
+                "filters": ["segment"],
+            },
+        },
+        {
+            "type": "insight_text",
+            "props": {"title": f"{segment} churn cohort detail", "body": ""},
+        },
+    ]
+
+
+def _build_investigate_layout(snapshot) -> dict:
+    """The validated a2ui dict for investigate runs (issue #16): the
+    drill-down layout replaces the whole canvas for the follow-up question,
+    bypassing the threshold cut (its items are CTA-authored, not
+    decider-scored). Validation through A2UILayout is the same parse
+    assertion _build_layout makes."""
+    layout_model = catalog.A2UILayout.model_validate(
+        {"items": _investigate_items(snapshot)}
+    ).model_dump()
+    catalog.A2UILayout.model_validate(layout_model)
+    return layout_model
+
+
 def _build_layout(state: AgentState) -> dict:
     """The validated a2ui dict for the layout node's happy path."""
     snapshot = state.get("snapshot") or {}
@@ -515,7 +683,17 @@ async def layout(state: AgentState) -> dict:
     """Cut the draft down to the decider's above-threshold picks and store
     the validated result. Sub-threshold components are dropped; when
     nothing survives (off-catalog queries, an unreadable snapshot, any
-    build error) the default single-insight_text view takes over."""
+    build error) the default single-insight_text view takes over.
+    Investigate follow-ups (issue #16) never run the cut: their drill-down
+    layout is CTA-authored, built and validated directly."""
+    snapshot = state.get("snapshot") or {}
+    if snapshot.get("investigate"):
+        try:
+            layout_model = _build_investigate_layout(snapshot)
+        except Exception as exc:  # noqa: BLE001 - invalid drafts never break the run
+            logger.warning("investigate layout fell back to the default view (%s)", exc)
+            layout_model = catalog._fallback_layout().model_dump()
+        return {"a2ui": layout_model, "status": STATUSES["layout"]}
     try:
         layout_model = _build_layout(state)
     except Exception as exc:  # noqa: BLE001 - invalid picks never break the run
@@ -527,26 +705,48 @@ async def layout(state: AgentState) -> dict:
 # --- Node: query --------------------------------------------------------------
 
 
-def _refresh_slot(item, snapshot):
+def _refresh_slot(item, snapshot, driver=None):
     """Re-run one surviving slot's window-scoped SQL in place. The decision
     context (read_state) used the trailing default DQ scope and no cohort
     rows at all; display-time props belong to the query's own window, so
     the three SQL-backed slots refresh here — slots whose props are already
-    window-scoped (kpi_row, line_chart) need nothing."""
+    window-scoped (kpi_row, line_chart) need nothing.
+
+    `driver` is the run's churn_driver (issue #16) — the cohort facts the
+    data_table/cause/insight refreshes consume; None (a failed or degraded
+    run) falls back per-slot: the churn table keeps its window-scoped rows,
+    the callout's cause stays None, the drill-down body stays empty/error.
+    Investigate runs fill the drill-down table from churn_cohort_detail at
+    the cohort window with the dominant segment filter."""
     slot_type = item.get("type")
     props = item.get("props")
     window = _snapshot_dict(snapshot, "window")
     start, end = window.get("start"), window.get("end")
+    investigate = bool((snapshot or {}).get("investigate"))
     if not start or not end or not isinstance(props, dict):
         return
     if slot_type == "data_quality_card":
         props["checks"] = quality.run_checks(window=(start, end))
     elif slot_type == "data_table":
-        props["rows"] = queries.churn_cohort((start, end), limit=50)
+        if investigate and isinstance(driver, dict):
+            props["rows"] = queries.churn_cohort_detail(
+                (driver["cohort_start"], driver["cohort_end"]),
+                segment=driver.get("dominant_segment"),
+                limit=50,
+            )
+        elif isinstance(driver, dict):
+            props["rows"] = driver.get("rows") or []
+        else:
+            props["rows"] = queries.churn_cohort((start, end), limit=50)
     elif slot_type == "variance_callout":
         churn = queries.churn_delta(end)
         props["delta"] = round(churn["delta"], 4)
         props["baseline"] = f"trailing 6-month average {churn['baseline']:.2%}"
+        props["cause"] = _churn_cause(driver)
+    elif slot_type == "insight_text" and investigate:
+        # Drill-down only: on normal runs fill owns the insight copy (via
+        # slotCopy), the props body stays the empty draft.
+        props["body"] = _investigate_body(driver)
 
 
 async def query(state: AgentState) -> dict:
@@ -560,11 +760,18 @@ async def query(state: AgentState) -> dict:
     ):
         return {"status": STATUSES["query"]}
     snapshot = state.get("snapshot") or {}
+    window = _snapshot_dict(snapshot, "window")
+    start, end = window.get("start"), window.get("end")
+    driver = None
+    try:
+        driver = queries.churn_driver((start, end), data_end=snapshot.get("data_end"))
+    except Exception as exc:  # noqa: BLE001 - one cohort failure keeps prior props
+        logger.warning("query: churn_driver failed (%s); slots keep prior props", exc)
     for item in layout_model["items"]:
         if not isinstance(item, dict):
             continue
         try:
-            _refresh_slot(item, snapshot)
+            _refresh_slot(item, snapshot, driver)
         except Exception as exc:  # noqa: BLE001 - one slot's SQL failure keeps its props
             logger.warning("query: %s refresh failed (%s)", item.get("type"), exc)
     try:

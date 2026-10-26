@@ -317,8 +317,8 @@ def build_question_set(query_text, snapshot):
             id=REAL_CHANGE_QUESTION_ID,
             prompt=(
                 context
-                + "Is the observed movement best explained by a real business "
-                "change rather than a data-quality problem? Answer yes or no."
+                + "Is this movement real business change vs. a data problem? "
+                "Answer yes or no."
             ),
         ),
         NoulQuestion(
