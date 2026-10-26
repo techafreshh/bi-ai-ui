@@ -21,3 +21,6 @@ __pycache__/
 .DS_Store
 
 .zcode/
+
+# Build output
+web/dist/
