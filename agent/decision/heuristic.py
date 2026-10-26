@@ -55,11 +55,15 @@ _ROUTE_CHOICE = {
 # Noul p(yes) per route, keyed by question id with a neutral default for
 # ids this transport does not know (kept total so a future question kind
 # still gets a parseable in-[0, 1] answer instead of an exception).
+# Issue #17: the data_problem noul's p(yes) IS the data-problem probability
+# (the DQ card's banner gate reads it from decisions[] directly) — the
+# quality route scores 0.94 (the PRD's ≈0.94 data-problem reading for the
+# clean-data routes it inverts) while the real-change routes score low.
 _ROUTE_NOUL = {
-    "real_change_vs_data_problem": {
-        "quality": 0.10,
-        "churn": 0.85,
-        "sales": 0.90,
+    "data_problem": {
+        "quality": 0.94,
+        "churn": 0.06,
+        "sales": 0.06,
         "off_catalog": 0.25,
     },
     "anomaly_callout": {

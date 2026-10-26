@@ -138,7 +138,7 @@ def test_question_set_shape_and_budget():
     by_id = {q.id: q for q in question_set}
     assert set(by_id) == {
         questions.CATALOG_QUESTION_ID,
-        questions.REAL_CHANGE_QUESTION_ID,
+        questions.DATA_PROBLEM_QUESTION_ID,
         questions.ANOMALY_QUESTION_ID,
         questions.DQ_CONFIDENCE_QUESTION_ID,
     }
@@ -146,7 +146,7 @@ def test_question_set_shape_and_budget():
     assert choice.type == "choice"
     assert tuple(choice.options) == questions.CATALOG_TYPES
     assert len(questions.CATALOG_TYPES) == 6
-    assert by_id[questions.REAL_CHANGE_QUESTION_ID].type == "noul"
+    assert by_id[questions.DATA_PROBLEM_QUESTION_ID].type == "noul"
     assert by_id[questions.ANOMALY_QUESTION_ID].type == "noul"
     assert by_id[questions.DQ_CONFIDENCE_QUESTION_ID].type == "score"
 

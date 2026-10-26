@@ -1,8 +1,8 @@
-// Issue #12: the fullscreen dashboard canvas. Fixture-driven (DEMO_LAYOUT)
-// until the chat issues land — the layout flows through the same
-// A2UIRenderer pipeline agent state will, so the acceptance contract
-// (exactly 6 registry-resolved components, no fallback cards) is the real
-// render path, not a special case.
+// Issue #12: the fullscreen dashboard canvas. Renders the layout it is
+// handed through the same A2UIRenderer pipeline agent state flows through,
+// so the acceptance contract (exactly 6 registry-resolved components, no
+// fallback cards) is the real render path, not a special case. Issue #17:
+// App passes the streamed a2ui here (DEMO_LAYOUT as the pre-run fallback).
 
 import { DEMO_LAYOUT } from "../lib/demoLayout";
 import { A2UIRenderer } from "./catalog/A2UIRenderer";

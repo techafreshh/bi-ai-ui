@@ -5,9 +5,11 @@ state to CopilotKit (issue #10).
 
   * read_state — DB aggregates + data-quality stats into `snapshot`:
     window-scoped KPIs (current + previous quarter, via queries.py), the
-    default-scope DQ checks (quality.py) and the churn delta. A missing or
-    unreadable DB degrades into an empty-handed snapshot instead of
-    raising — the graph must complete wherever it runs.
+    data-quality checks scoped to the detected anomaly window
+    (snapshot["dq_scope"], issue #17 — trailing-30 default when the data
+    reads clean) and the churn delta. A missing or unreadable DB degrades
+    into an empty-handed snapshot instead of raising — the graph must
+    complete wherever it runs.
   * decide — questions.build_question_set's fixed catalog question set,
     fanned out through DecisionClient.decide (the #8 seam) over the wired
     transport (#9's OpenRouter chain when a key is configured, the
@@ -48,6 +50,7 @@ import logging
 import os
 import re
 import time
+from datetime import date
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -282,6 +285,10 @@ async def read_state(state: AgentState) -> dict:
         "degraded": False,
         "data_end": None,
         "investigate": _is_investigate(user_text),
+        # Issue #17: the detected anomaly window — None until (and unless)
+        # the aggregates below prove the data is dirty somewhere recent, so
+        # degraded runs carry the key with its 'no anomaly' value.
+        "dq_scope": None,
     }
 
     data_end = None
@@ -305,12 +312,21 @@ async def read_state(state: AgentState) -> dict:
         snapshot["previous_kpis"] = queries.kpis(
             *questions.previous_quarter((start,))
         )
-        snapshot["dq_checks"] = quality.run_checks()
+        # Issue #17: the decision-context DQ checks read the window where
+        # the data is actually dirty (the detected anomaly scope) when one
+        # exists, so "Is the data clean?" decides on the corrupted window
+        # instead of a diluting trailing-30 default; the display window can
+        # only match it by coincidence, which is why `query` re-runs
+        # window-scoped SQL for the surviving slots.
+        scope = quality.recent_problem_scope()
+        snapshot["dq_scope"] = scope
+        snapshot["dq_checks"] = (
+            quality.run_checks(window=(scope["start"], scope["end"]))
+            if scope is not None
+            else quality.run_checks()
+        )
         snapshot["churn"] = queries.churn_delta(end)
         snapshot["churn_driver"] = queries.churn_driver((start, end), data_end=data_end)
-        # Decision context used the trailing default DQ scope; the display
-        # window can only match it by coincidence, which is why `query`
-        # re-runs window-scoped SQL for the surviving slots.
     except Exception as exc:  # noqa: BLE001 - DB problems degrade, never raise
         logger.error("read_state: aggregates failed (%s); degrading snapshot", exc)
         snapshot["degraded"] = True
@@ -324,10 +340,9 @@ def _pick(answer) -> str | float:
     """The decider's pick for one answer: the argmax option for choice
     (first option wins ties — probabilities arrive in question-option
     order, so a strict `>` keeps the earlier one), "yes"/"no" for noul
-    (yes when p >= 0.5), the score itself for score questions. The
-    real-change noul never flows through here untreated — the decide node
-    reshapes it into the {real, data_problem} dict whose pick is the argmax
-    KEY (see _real_change_probabilities)."""
+    (yes when p >= 0.5), the score itself for score questions. The noul's
+    scalar p(yes) ships as-is (issue #17: it reads directly as the
+    data_problem probability the DQ card's banner gates on)."""
     probabilities = answer.probabilities
     if isinstance(probabilities, dict):
         best_option, best_value = None, None
@@ -338,28 +353,6 @@ def _pick(answer) -> str | float:
     if answer.type == "score":
         return float(probabilities)
     return "yes" if float(probabilities) >= 0.5 else "no"
-
-
-def _real_change_probabilities(answer):
-    """Issue #16 acceptance: the real_change_vs_data_problem noul ships its
-    probabilities as a {"real", "data_problem"} dict summing to 1, not the
-    DecisionClient's scalar p(yes). A scalar answer is re-stamped as
-    {real: p, data_problem: 1-p} (4-decimal rounding keeps the sum within
-    ~4e-4 of 1.0) and the pick becomes the argmax KEY along the same 0.5
-    line _pick uses. Any other shape (or question id) passes through
-    untouched — the reshaping is a presentation concern over the existing
-    #8 noul contract, never a parser change."""
-    probabilities = answer.probabilities
-    if (
-        answer.id != questions.REAL_CHANGE_QUESTION_ID
-        or not isinstance(probabilities, (int, float))
-        or isinstance(probabilities, bool)
-    ):
-        return probabilities, _pick(answer)
-    scalar = round(float(probabilities), 4)
-    reshaped = {"real": scalar, "data_problem": round(1.0 - scalar, 4)}
-    pick = "real" if scalar >= 0.5 else "data_problem"
-    return reshaped, pick
 
 
 async def _decide_with(transport, threshold, question_set):
@@ -407,13 +400,12 @@ async def decide(state: AgentState) -> dict:
     model = _model_label(timed)
     decisions = []
     for answer in answers:
-        probabilities, pick = _real_change_probabilities(answer)
         decisions.append(
             {
                 "id": answer.id,
                 "type": answer.type,
-                "probabilities": probabilities,
-                "pick": pick,
+                "probabilities": answer.probabilities,
+                "pick": _pick(answer),
                 "model": model,
                 "latency_ms": round(elapsed_ms.get(answer.id, 0.0), 2),
                 "above_threshold": answer.above_threshold,
@@ -570,6 +562,27 @@ def _catalog_probabilities(decisions):
     return {}
 
 
+def _data_problem_probability(decisions):
+    """The data_problem noul's p(yes) — the DQ card's banner gate input
+    (issue #17). Tolerant like _catalog_probabilities: missing/malformed
+    answers read 0.0 (the gate stays shut, fail-safe) and the scalar is
+    clamped into [0, 1] before it reaches the frontend."""
+    for entry in decisions or []:
+        if (
+            not isinstance(entry, dict)
+            or entry.get("id") != questions.DATA_PROBLEM_QUESTION_ID
+        ):
+            continue
+        probabilities = entry.get("probabilities")
+        if (
+            isinstance(probabilities, (int, float))
+            and not isinstance(probabilities, bool)
+        ):
+            return min(1.0, max(0.0, float(probabilities)))
+        return 0.0
+    return 0.0
+
+
 def _churn_cause(driver):
     """The variance callout's cause line (issue #16), or None when the data
     does not prove it. The claim is data-grounded: it is spoken ONLY when
@@ -673,6 +686,15 @@ def _build_layout(state: AgentState) -> dict:
         _draft_items(snapshot), probabilities, _layout_threshold()
     )
     layout_model = kept.model_dump()
+    # Issue #17: stamp the banner gate's probability onto the kept DQ card
+    # (not _draft_items — gating is a per-run decision fact, not a draft
+    # prop). p prints into the wire props the frontend gates on; a card the
+    # cut dropped never carries it. Stamped BEFORE the parse assert so an
+    # off-contract stamp fails the node instead of the browser.
+    data_problem = _data_problem_probability(state.get("decisions"))
+    for item in layout_model["items"]:
+        if item.get("type") == "data_quality_card":
+            item["props"]["data_problem"] = data_problem
     # Parse assertion (issue acceptance clause 4): what this node stores
     # must survive A2UILayout — the number the frontend trusts.
     catalog.A2UILayout.model_validate(layout_model)
@@ -705,12 +727,79 @@ async def layout(state: AgentState) -> dict:
 # --- Node: query --------------------------------------------------------------
 
 
+_MONTH_ABBRS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def _humanize_day_range(start, end):
+    """'Sep 8-21, 2026' — the DQ evidence window in banner human terms
+    (abbreviated month, ASCII hyphen so the acceptance substring 'Sep'
+    matches exactly). Same-year ranges read 'Sep 30-Oct 2, 2026'; a range
+    crossing a year boundary keeps both years ('Dec 28, 2025-Jan 3, 2026').
+    Raises ValueError on non-ISO bounds (the run's own detection writes
+    ISO dates; validation mirrors quality._require_date's discipline)."""
+    start_day = date.fromisoformat(_require_iso_day(start, "range start"))
+    end_day = date.fromisoformat(_require_iso_day(end, "range end"))
+    if start_day > end_day:
+        raise ValueError(
+            f"range start {start} is after range end {end}"
+        )
+    if start_day.year != end_day.year:
+        return (
+            f"{_MONTH_ABBRS[start_day.month - 1]} {start_day.day}, "
+            f"{start_day.year}-{_MONTH_ABBRS[end_day.month - 1]} "
+            f"{end_day.day}, {end_day.year}"
+        )
+    if start_day.month != end_day.month:
+        return (
+            f"{_MONTH_ABBRS[start_day.month - 1]} {start_day.day}-"
+            f"{_MONTH_ABBRS[end_day.month - 1]} {end_day.day}, {end_day.year}"
+        )
+    return (
+        f"{_MONTH_ABBRS[start_day.month - 1]} {start_day.day}-"
+        f"{end_day.day}, {end_day.year}"
+    )
+
+
+def _require_iso_day(value, label):
+    """value must be an ISO 'YYYY-MM-DD' string; returns it verbatim after
+    validating (local copy of queries._require_date's contract, so the
+    query node never calls date.fromisoformat on unchecked input)."""
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be an ISO 'YYYY-MM-DD' date string")
+    date.fromisoformat(value)  # ValueError on anything non-ISO
+    return value
+
+
+def _dq_problem_detail(scope):
+    """The DQ banner's evidence line (issue #17): the narrated window and
+    segment the planted corruption clusters in — e.g. 'duplicate and null
+    usage rows cluster in Sep 8-21, 2026 (2026-09-08..2026-09-21), Startup
+    segment'. Total: a malformed or missing scope reads None, never a
+    raise (the banner copy is narrated from the agent's own detection)."""
+    if not isinstance(scope, dict):
+        return None
+    start, end = scope.get("start"), scope.get("end")
+    try:
+        window = f"{_humanize_day_range(start, end)} ({start}..{end})"
+    except ValueError:
+        return None
+    detail = f"duplicate and null usage rows cluster in {window}"
+    segment = scope.get("segment")
+    if isinstance(segment, str) and segment:
+        detail += f", {segment} segment"
+    return detail
+
+
 def _refresh_slot(item, snapshot, driver=None):
-    """Re-run one surviving slot's window-scoped SQL in place. The decision
-    context (read_state) used the trailing default DQ scope and no cohort
-    rows at all; display-time props belong to the query's own window, so
-    the three SQL-backed slots refresh here — slots whose props are already
-    window-scoped (kpi_row, line_chart) need nothing.
+    """Re-run one surviving slot's window-scoped SQL in place. Display-time
+    props belong to the query's own window, so the three SQL-backed slots
+    refresh here — slots whose props are already window-scoped (kpi_row,
+    line_chart) need nothing. Exception (issue #17): the DQ card re-runs in
+    the detected anomaly scope when there is one, reading where the data is
+    actually dirty instead of where the user asked.
 
     `driver` is the run's churn_driver (issue #16) — the cohort facts the
     data_table/cause/insight refreshes consume; None (a failed or degraded
@@ -726,7 +815,26 @@ def _refresh_slot(item, snapshot, driver=None):
     if not start or not end or not isinstance(props, dict):
         return
     if slot_type == "data_quality_card":
-        props["checks"] = quality.run_checks(window=(start, end))
+        # Issue #17: the card reads its checks where the corruption lives
+        # (the detected anomaly scope) instead of the display window — the
+        # display window only matches by coincidence; undetected dirt (or
+        # a degraded snapshot) keeps the display-window scoping.
+        scope = (snapshot or {}).get("dq_scope")
+        if (
+            isinstance(scope, dict)
+            and isinstance(scope.get("start"), str)
+            and isinstance(scope.get("end"), str)
+        ):
+            props["checks"] = quality.run_checks(
+                window=(scope["start"], scope["end"])
+            )
+            # Compute after the checks so a narrating failure cannot undo
+            # the refresh (a None detail just keeps the gate's fallback).
+            detail = _dq_problem_detail(scope)
+            if detail:
+                props["data_problem_detail"] = detail
+        else:
+            props["checks"] = quality.run_checks(window=(start, end))
     elif slot_type == "data_table":
         if investigate and isinstance(driver, dict):
             props["rows"] = queries.churn_cohort_detail(
@@ -786,6 +894,12 @@ async def query(state: AgentState) -> dict:
 # --- Node: fill ---------------------------------------------------------------
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+# Issue #17: the DQ card's diagnostics slot — machine fact written
+# deterministically by fill when the card survived the cut, excluded from
+# the model's parsed override (a live model may drop the literal
+# 'duplicate'/'null' words the acceptance clause matches on).
+DQ_SLOT_KEY = "data_quality_card.summary"
 
 
 def _parse_loose_json(text):
@@ -887,6 +1001,54 @@ def _fill_messages(snapshot):
     ]
 
 
+def _dq_slot_copy(layout_model):
+    """The deterministic data_quality_card.summary copy (issue #17): the
+    failing checks named verbatim (which carries the literal 'duplicate'
+    and 'null' substrings the acceptance clause matches on), or the
+    could-not-read variant on empty/missing checks, or the all-passing
+    variant otherwise — the narrated detail line appended when the card
+    carries one. Returns None when no data_quality_card is in the layout
+    (the fallback view) so fill writes no orphan slot key."""
+    card = next(
+        (
+            item
+            for item in (layout_model or {}).get("items") or []
+            if isinstance(item, dict) and item.get("type") == "data_quality_card"
+        ),
+        None,
+    )
+    if card is None:
+        return None
+    props = card.get("props") or {}
+    checks = props.get("checks")
+    # Present and non-empty means readable: an empty list (degraded snapshot)
+    # or malformed rows are 'could not read', not 'all passing'.
+    checks_ok = (
+        isinstance(checks, list)
+        and len(checks) > 0
+        and all(isinstance(row, dict) for row in checks)
+    )
+    if not checks_ok:
+        return "Data-quality checks could not be read for this window."
+    failing = [
+        str(row.get("name"))
+        for row in checks
+        if row.get("status") == "fail"
+    ]
+    detail = props.get("data_problem_detail")
+    has_detail = isinstance(detail, str) and bool(detail.strip())
+    if failing:
+        # Failing names verbatim — the literal 'duplicate'/'null' substrings
+        # the acceptance clause matches on ride in those names.
+        copy = "Data-quality checks failing: " + ", ".join(failing)
+        copy += f" — {detail.strip()}" if has_detail else "."
+    else:
+        copy = "All data-quality checks pass for this window."
+        if has_detail:
+            copy += f" — {detail.strip()}"
+    return copy
+
+
 async def _stream_fill_text(snapshot):
     """The fill node's ONE text-model call, streamed chunk-by-chunk so the
     adapter still puts token deltas on the wire (mirrors the old chat
@@ -928,13 +1090,21 @@ async def fill(state: AgentState) -> dict:
             {
                 str(key): value
                 for key, value in parsed.items()
-                if isinstance(value, str)
+                # The DQ summary is machine fact: even a model that emits
+                # the key never overrides the deterministic diagnostics.
+                if isinstance(value, str) and key != DQ_SLOT_KEY
             }
         )
     elif text and text.strip():
         # Model reply that is not the requested JSON: the chat's closing
         # message is the model's own words verbatim.
         copy["summary"] = text.strip()
+
+    # Issue #17: deterministic diagnostics for a surviving DQ card — the
+    # one slot the text model neither writes nor overrides.
+    dq_summary = _dq_slot_copy(layout_model)
+    if dq_summary is not None:
+        copy[DQ_SLOT_KEY] = dq_summary
 
     a2ui = {
         **layout_model,

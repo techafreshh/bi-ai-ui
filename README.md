@@ -38,7 +38,10 @@ React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
   components, and `fill` makes exactly one streamed text-model call writing
   the narrative into `slotCopy`. Shared state — `a2ui`, `decisions[]`,
   `status` — is streamed to the client on every node transition; the final
-  text reply is the fill summary.
+  text reply is the fill summary. The sidebar's chat answers are composed
+  onto the fullscreen canvas: the SPA renders the streamed `a2ui` directly
+  (`web/src/hooks/useA2UI.ts`, latest run wins), with the demo fixture as
+  the pre-run fallback.
 - Mock B2B-SaaS data lives in `data/app.db` (gitignored), generated
   deterministically by `python agent/scripts/generate_data.py`: ~5–8k
   accounts plus 24 months (2024-10-01 → 2026-09-30) of daily
@@ -51,7 +54,16 @@ React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
   `agent/quality.py` runs the freshness / duplicates / nulls data-quality
   checks over an inclusive date scope (default: the trailing 30 days ending
   at the latest observed event day), returning `{name, status, score}` rows
-  for the "Is the data clean?" card.
+  for the "Is the data clean?" card. Since issue #17 the card reads where
+  the data is actually dirty: `recent_problem_scope()` scans the trailing
+  120 days for duplicate/null-corrupted usage rows and reports the
+  contiguous anomalous window with its majority segment (on the seeded DB:
+  Sept 8–21, 2026, Startup) — `read_state` scopes the decision-context
+  checks to it (`snapshot["dq_scope"]`), and the canvas card stamps the
+  `data_problem` Noul probability plus the narrated window/segment detail
+  so the frontend shows a warning banner with a "Report an issue"
+  affordance (console log + toast; no backend) above a deterministic
+  `data_quality_card.summary` slot.
 - Both services run from `docker-compose.yml` (web dev server :5173,
   agent :8123).
 

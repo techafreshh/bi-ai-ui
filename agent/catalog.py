@@ -122,11 +122,18 @@ class CheckResult(BaseModel):
 
 
 class DataQualityCardProps(BaseModel):
-    """data_quality_card props: the run_checks rows it surfaces (PRD §7)."""
+    """data_quality_card props: the run_checks rows it surfaces (PRD §7).
+    Issue #17 adds two optional agent-stamped fields: data_problem is the
+    data_problem noul's probability (the frontend banner gate reads it —
+    absent keeps the gate shut on fixture/older renders) and
+    data_problem_detail is the narrated evidence line (window + segment)
+    the banner and the card's summary slot repeat."""
 
     model_config = ConfigDict(extra="forbid")
 
     checks: list[CheckResult]
+    data_problem: float | None = None
+    data_problem_detail: str | None = None
 
 
 class InsightTextProps(BaseModel):

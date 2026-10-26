@@ -44,6 +44,19 @@ event date; with only `end` (or with neither), `start` is
 DEFAULT_SCOPE_DAYS - 1 days before `end`; on an eventless DB `end` falls
 back to today, where every check degenerates to its empty-scope reading.
 
+Problem scoping (issue #17): recent_problem_scope() detects WHERE the data
+is actually dirty rather than trusting a display window — it scans the
+trailing _PROBLEM_LOOKBACK_DAYS (ending at the latest observed event day,
+like run_checks' anchor) for usage rows that are exact-duplicate extras or
+NULL-units (precisely the duplicates/nulls checks' numerators, tallied per
+day and segment), clips them to the contiguous calendar-day run ending at
+the latest dirty day, and reports that run with the majority segment of its
+dirty rows (ties break alphabetically). On the seeded DB that is exactly
+2026-09-08..2026-09-21, Startup — the Sept ingest bug — so "Is the data
+clean?" is read where the corruption lives instead of over a diluting
+trailing-30 window; a clean or eventless DB reads None and the caller keeps
+its own scoping.
+
 Security model mirrors queries.py: every SQL statement is a static
 module-level template; values are interpolated NEVER — they travel only as
 bound ? parameters, and caller-supplied date strings are canonicalized via
@@ -137,6 +150,41 @@ SELECT
     (SELECT COUNT(*) FROM usage_events
      WHERE event_date BETWEEN ? AND ? AND units IS NULL),
     (SELECT COUNT(*) FROM usage_events WHERE event_date BETWEEN ? AND ?)
+"""
+
+# Issue #17 problem detection: how far back the corruption scan reaches —
+# the Sept plant ends 9 days before the seed's 2026-09-30 anchor, so 120
+# days leave margin for the plant drifting with future regenerations.
+_PROBLEM_LOOKBACK_DAYS = 120
+
+# Dirty usage rows per (event_date, segment): exact-duplicate EXTRAS only —
+# SUM(n - 1) over the same (account_id, event_date, metric, units) groups
+# _SQL_DUPLICATE_SHARE counts — joined to accounts for the segment (each
+# dup group sits entirely on one account, so the segment is unambiguous).
+# Params: (start, end).
+_SQL_PROBLEM_DUP_ROWS = """
+SELECT event_date AS d, segment, SUM(n - 1) AS extras
+FROM (
+    SELECT ue.account_id, ue.event_date, ue.metric, ue.units,
+           a.segment AS segment, COUNT(*) AS n
+    FROM usage_events ue
+    JOIN accounts a ON a.id = ue.account_id
+    WHERE ue.event_date BETWEEN ? AND ?
+    GROUP BY ue.account_id, ue.event_date, ue.metric, ue.units, a.segment
+    HAVING COUNT(*) > 1
+)
+GROUP BY event_date, segment
+"""
+
+# Dirty usage rows per (event_date, segment): NULL-units rows, mirroring
+# _SQL_NULL_SHARE's numerator. Params: (start, end).
+_SQL_PROBLEM_NULL_ROWS = """
+SELECT ue.event_date AS d, a.segment AS segment, COUNT(*) AS n
+FROM usage_events ue
+JOIN accounts a ON a.id = ue.account_id
+WHERE ue.event_date BETWEEN ? AND ?
+  AND ue.units IS NULL
+GROUP BY ue.event_date, a.segment
 """
 
 
@@ -276,3 +324,81 @@ def run_checks(start=None, end=None, *, window=None):
     # Assembling from _CHECK_NAMES pins "exactly these three, in this order"
     # by construction.
     return [_result(name, *metrics[name]) for name in _CHECK_NAMES]
+
+
+def _latest_dirty_run(iso_days):
+    """The contiguous calendar-day run ending at the latest dirty day, as a
+    (start_iso, end_iso) pair — or None when no days are given. Pure: feeds
+    from the detection scan's own day strings, cloning _require_date's
+    validation so a non-ISO day raises ValueError before any range math.
+    Clipping to the contiguous tail keeps the reported window anchored on
+    the LIVE problem: dirty days that a clean day separates from the tail
+    are older dirt, not the scope this module claims."""
+    days = sorted(_require_date(day, "dirty day") for day in iso_days)
+    if not days:
+        return None
+    end = date.fromisoformat(days[-1])
+    start = end
+    remaining = set(days)
+    while (start - timedelta(days=1)).isoformat() in remaining:
+        start -= timedelta(days=1)
+    return start.isoformat(), end.isoformat()
+
+
+def recent_problem_scope(lookback_days=_PROBLEM_LOOKBACK_DAYS):
+    """Detect the recent window where the data is actually dirty (issue #17).
+
+    Scans the trailing `lookback_days` (ending at the latest observed event
+    day, never a wall clock) for usage rows that are exact-duplicate extras
+    or NULL-units — the duplicates/nulls checks' own numerators, tallied
+    per (day, segment) — then clips to the contiguous dirty-day run ending
+    at the latest dirty day and takes that run's majority segment (most
+    dirty rows first, alphabetical on ties). Returns
+    {"start", "end", "segment"} or None when the DB is clean or eventless;
+    ValueError on a non-positive or non-integer lookback_days (bools read
+    as the ints they subclass, so they are rejected explicitly). Read-only
+    over usage_events + accounts, like every query in this module."""
+    if (
+        isinstance(lookback_days, bool)
+        or not isinstance(lookback_days, int)
+        or lookback_days < 1
+    ):
+        raise ValueError(
+            f"lookback_days must be a positive integer, got {lookback_days!r}"
+        )
+    conn = db.connect(readonly=True)
+    try:
+        end = _latest_event_date(conn)
+        if not end:
+            # Eventless DB: no anchor day, nothing to scope — the caller
+            # falls back to its own window (run_checks semantics).
+            return None
+        start = (
+            date.fromisoformat(end) - timedelta(days=lookback_days - 1)
+        ).isoformat()
+        # (day, segment) -> dirty-row count: duplicate extras + NULL-units
+        # rows, i.e. exactly the rows the two share checks would penalize.
+        dirty = {}
+        for day, segment, extras in conn.execute(
+            _SQL_PROBLEM_DUP_ROWS, (start, end)
+        ):
+            dirty[(day, segment)] = dirty.get((day, segment), 0) + (extras or 0)
+        for day, segment, rows in conn.execute(
+            _SQL_PROBLEM_NULL_ROWS, (start, end)
+        ):
+            dirty[(day, segment)] = dirty.get((day, segment), 0) + (rows or 0)
+        if not dirty:
+            return None
+        run_start, run_end = _latest_dirty_run([day for day, _ in dirty])
+        segment_counts = {}
+        for (day, segment), rows in dirty.items():
+            # The segment must describe the returned run, not the whole
+            # lookback: dirt outside the run is a different (older) story.
+            if run_start <= day <= run_end:
+                segment_counts[segment] = segment_counts.get(segment, 0) + rows
+        segment = min(
+            segment_counts, key=lambda name: (-segment_counts[name], name)
+        )
+        return {"start": run_start, "end": run_end, "segment": segment}
+    finally:
+        conn.close()
