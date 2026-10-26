@@ -65,24 +65,39 @@ def payload_lines(lines: Iterator[str]) -> list[dict]:
     ]
 
 
-def test_chat_node_streams_from_openai_compatible_provider(fake_provider):
-    """The graph node's merged reply equals the provider's streamed text."""
-    import asyncio
+def test_fill_calls_openai_compatible_provider(fake_provider):
+    """The graph's fill node makes its one text-model call through the same
+    OpenAI-compatible contract (issue #10 replaced the single chat node;
+    the provider-facing request shape is unchanged)."""
+    client = TestClient(__import__("server").app)
+    payloads = payload_lines(sse_lines(client))
 
-    from langchain_core.messages import AIMessage
+    types = [p["type"] for p in payloads]
+    assert "RUN_FINISHED" in types
+    assert "RUN_ERROR" not in types
+    snapshots = [p["snapshot"] for p in payloads if p["type"] == "STATE_SNAPSHOT"]
+    assert snapshots, "the graph must stream shared state"
+    # The unparseable (non-JSON) reply streams as the chat's summary
+    # verbatim — the streamed AIMessage the run closes on.
+    final_state = snapshots[-1]
+    final_messages = final_state["messages"]
+    assert final_messages[-1]["type"] == "ai"
+    assert final_messages[-1]["content"] == REPLY
+    final_a2ui = final_state["a2ui"]
+    assert final_a2ui["slotCopy"]["summary"] == REPLY
 
-    import graph as agent_graph
-
-    state = {"messages": [("user", "ping")]}
-    result = asyncio.run(agent_graph.chat(state))
-    merged = result["messages"][-1]
-    assert merged.content == REPLY
-    assert isinstance(merged, AIMessage)
-
-    request = fake_provider.requests[0]
-    assert request["path"].endswith("/v1/chat/completions")
-    assert request["authorization"] == "Bearer test-key"
-    assert request["body"]["model"] == "openai/gpt-6-luna"
+    # The recorded request keeps the OpenRouter-shaped contract: bearer
+    # key, default model id, chat-completions path. Decide ran first (its
+    # /v1/decisions probes 404 on this fake and fell back), so fill's call
+    # is the LAST chat-completions request the fake recorded.
+    chat_requests = [
+        request for request in fake_provider.requests
+        if request["path"].endswith("/v1/chat/completions")
+    ]
+    assert chat_requests, "fill must call the text provider"
+    fill_request = chat_requests[-1]
+    assert fill_request["authorization"] == "Bearer test-key"
+    assert fill_request["body"]["model"] == "openai/gpt-6-luna"
 
 
 def test_copilotkit_endpoint_streams_text_reply(fake_provider):

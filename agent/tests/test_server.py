@@ -5,13 +5,15 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import HumanMessage
 
-import graph as agent_graph
+import db
 import server as server_module
 from server import _open_listeners, app
 
@@ -79,11 +81,38 @@ def test_unknown_top_level_path_answers_404_fast():
         assert elapsed < 2.0, f"{method} {path} took {elapsed:.2f}s (gate budget 5s)"
 
 
-def test_chat_node_raises_clear_error_without_api_key(monkeypatch):
-    """No OPENROUTER_API_KEY: /health still serves, chat fails loudly."""
+def test_graph_completes_without_api_key(monkeypatch):
+    """No OPENROUTER_API_KEY: /health still serves, and the five-node graph
+    now completes its full run — fill degrades to deterministic copy
+    instead of failing the request (issue #10's shared-state contract). The
+    decision layer wired without a key is the heuristic transport, so the
+    run needs nothing."""
+    import pathlib
+
+    import graph as graph_module
+    from decision.client import DecisionClient
+    from decision.heuristic import HeuristicTransport
+
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
-        asyncio.run(agent_graph.chat({"messages": []}))
+    original_db_path = db.DEFAULT_DB_PATH
+    db.DEFAULT_DB_PATH = pathlib.Path(tempfile.mkdtemp()) / "missing.db"
+    try:
+        monkeypatch.setattr(
+            graph_module,
+            "get_decision_client",
+            lambda: DecisionClient(HeuristicTransport()),
+        )
+        result = asyncio.run(
+            graph_module.graph.ainvoke(
+                {"messages": [HumanMessage(content="Show me sales in Q3")]},
+                config={"configurable": {"thread_id": f"nokey-{time.time()}"}},
+            )
+        )
+    finally:
+        db.DEFAULT_DB_PATH = original_db_path
+    assert result["status"] == "done"
+    assert result["decisions"], "decisions must still be stamped without a key"
+    assert result["a2ui"]["slotCopy"], "fill must write deterministic copy"
 
 
 AGENT_DIR = server_module.__file__.rsplit("/", 1)[0]
