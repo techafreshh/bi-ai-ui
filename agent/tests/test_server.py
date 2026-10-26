@@ -158,11 +158,32 @@ def _boot_with_port(env_port: dict[str, str], probe_ports: tuple[int, ...]):
             proc.kill()
 
 
+def _http_serving(port):
+    """True when something already answers /health on this port."""
+    try:
+        return httpx.get(f"http://127.0.0.1:{port}/health", timeout=1.0).status_code == 200
+    except (httpx.HTTPError, OSError):
+        return False
+
+
 def test_server_honors_agent_port_env_override():
-    """AGENT_PORT remaps the bind: health answers on 8121, not on 8123."""
-    codes = _boot_with_port({"AGENT_PORT": "8121", "PORT": ""}, (8121, 8123))
+    """AGENT_PORT remaps the bind: health answers on 8121, not on 8123.
+
+    The negative half is skipped when 8123 was already serving BEFORE the
+    subprocess booted (the dev container hosts a foreign server on the default
+    port — the factory's runtime-gate service built from a different tree):
+    the probe cannot tell that listener from one this test's own server
+    bound, so an alien 200 is not evidence. The override contract itself
+    stays fully asserted via the positive 8121 check either way.
+    """
+    foreign_default = _http_serving(8123)
+    codes = _boot_with_port(
+        {"AGENT_PORT": "8121", "PORT": ""},
+        (8121,) if foreign_default else (8121, 8123),
+    )
     assert codes[8121] == 200, codes
-    assert codes[8123] is None, "server must NOT bind the default when AGENT_PORT set"
+    if not foreign_default:
+        assert codes[8123] is None, "server must NOT bind the default when AGENT_PORT set"
 
 
 def test_agent_port_wins_over_paas_port():
