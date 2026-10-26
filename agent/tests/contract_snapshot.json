@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "captured_at": "2026-10-26T13:12:34+00:00",
+    "model": "~perplexity/pplx-decider-flash-latest",
+    "url": "http://127.0.0.1:8949/decisions",
+    "source": "custom-endpoint",
+    "questions": [
+      "which-components",
+      "is-data-problem"
+    ],
+    "elapsed_s": 0.095,
+    "note": "captured via scripts/contract_spike.py against a local PRD-s10 stub endpoint: no OPENROUTER_API_KEY exists on the implementer box; re-run the spike unmodified against live OpenRouter to refresh"
+  },
+  "response": {
+    "answers": [
+      {
+        "id": "which-components",
+        "type": "choice",
+        "probabilities": {
+          "kpi_row": 0.43,
+          "line_chart": 0.25,
+          "variance_callout": 0.12,
+          "data_table": 0.1,
+          "data_quality_card": 0.06,
+          "insight_text": 0.04
+        }
+      },
+      {
+        "id": "is-data-problem",
+        "type": "noul",
+        "probabilities": 0.12
+      }
+    ]
+  }
+}
