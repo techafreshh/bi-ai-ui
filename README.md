@@ -1,82 +1,74 @@
 # bi-ai-ui
 
-AI business-intelligence dashboard where a chat agent composes the UI from a
-fixed catalog of pre-built components — see
-[`.agents/PRDs/PRD.md`](.agents/PRDs/PRD.md) for the full product spec.
+AI business-intelligence dashboard where a chat agent answers natural-language
+queries by composing the UI from a fixed catalog of pre-built, design-system
+components — the agent classifies each query, assembles a validated layout,
+and streams the narrative from an OpenRouter text model; it never invents
+markup. Full product spec: [.agents/PRDs/PRD.md](.agents/PRDs/PRD.md).
 
-This is the **walking skeleton** (issue #1): a Vite React SPA talking to a
-LangGraph Python agent with a live streamed chat round-trip.
+## Architecture
 
-## Run
+```
+React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
+┌─────────────────────────┐  AG-UI SSE  ┌───────────────────────┐  OpenAI-compatible
+│ CopilotKit v2 provider  │ ──────────▶ │ POST /copilotkit      │ ─────────────▶
+│ HttpAgent · CopilotSidebar│◀──────────│ single-node chat graph│   text model
+└─────────────────────────┘ token deltas │ (TEXT_MESSAGE_* out)  │ ◀─────────────
+                                         └───────────┬───────────┘ (key: agent/.env)
+                                                     │
+                                                     ▼
+                                      ┌───────────────────────────┐
+                                      │ SQLite — planned          │
+                                      │ (seeded demo data, PRD §7;│
+                                      │ not in the skeleton yet)  │
+                                      └───────────────────────────┘
+```
+
+- The browser connects directly to the FastAPI agent (no Node runtime in
+  between, PRD v1.1); the agent's CORS allows only the Vite dev origin
+  (`agent/server.py`).
+- The agent is a single LangGraph `chat` node streaming an OpenRouter
+  text model as an OpenAI-compatible endpoint (`agent/graph.py`).
+- SQLite persistence is planned for the data phase (PRD §7); both services
+  run from `docker-compose.yml` (web dev server :5173, agent :8123).
+
+## Quickstart
+
+Requires only Docker — no API key is needed to boot (chat needs one).
 
 ```bash
-git clone <repo> && cd bi-ai-ui
-cp .env.example agent/.env      # then put your OpenRouter key in agent/.env
+git clone https://github.com/techafreshh/bi-ai-ui.git && cd bi-ai-ui
+cp agent/.env.example agent/.env
 docker compose up
 ```
 
-- SPA: http://localhost:5173 — type "ping" in the sidebar chat and watch the
-  streamed reply arrive (round-trip: browser → CopilotKit → agent → OpenRouter
-  text model).
-- Agent: http://localhost:8123 — `GET /health` returns `{"status": "ok"}`,
-  `POST /copilotkit` is the AG-UI/SSE chat endpoint.
+- SPA: http://localhost:5173 — open it and chat in the sidebar ("ping").
+- Agent: http://localhost:8123 — `GET /health` returns exactly `{"status": "ok"}`.
+- Without an OpenRouter key in `agent/.env`, both services still boot and
+  `/health` keeps returning 200; only chat requests fail (the agent log names
+  the missing variable).
 
-Without a key the agent still boots and `/health` stays 200; it logs a clear
-error naming `OPENROUTER_API_KEY` and only chat requests fail.
-
-## Ports
-
-| Service | Port | Why |
-|---|---|---|
-| web (Vite dev server) | 5173 | Vite default |
-| agent (FastAPI) | 8123 | Pinned per the CopilotKit LangGraph quickstart |
-
-The agent's bind address can be remapped without code changes — `--host`/
-`--port` flags or the `AGENT_HOST`/`AGENT_PORT` (alternatively generic `PORT`)
-env vars — but 8123 is the default and what the SPA and compose publish.
-
-## Environment variables
-
-| Variable | Where | Purpose |
-|---|---|---|
-| `OPENROUTER_API_KEY` | `agent/.env` (server-side only, gitignored) | OpenRouter key for the text model |
-| `TEXT_MODEL` | `agent/.env` | Model id, default `openai/gpt-6-luna` |
-| `OPENROUTER_BASE_URL` | `agent/.env` (optional) | Override to point at another OpenAI-compatible endpoint; default `https://openrouter.ai/api/v1` |
-
-## Dependency pins worth knowing
-
-- **zod v3** — the CopilotKit quickstart pins zod v3; unversioned installs pull
-  zod v4, which does not satisfy the CopilotKit SDK peers. We pin the v3 line
-  (`^3.25.76`) in `web/package.json`.
-- **`@ag-ui/*` at 1.0.2** — npm `overrides` hold the AG-UI package family at
-  the version the pinned `@copilotkit/react-core` was built against.
-- **`ag-ui-langgraph[fastapi]==0.0.44`** — 0.0.43 breaks `copilotkit==0.1.96`
-  at request-cloning time; the reason is documented inline in
-  `agent/pyproject.toml`, matching the official starter.
-
-## Development without Docker
+## Environment
 
 ```bash
-# agent (Python 3.12+)
-cd agent && uv sync && uv run python server.py
-
-# web (Node 22+)
-cd web && npm install && npm run dev
+cp agent/.env.example agent/.env   # server-side only; agent/.env is gitignored
 ```
 
-Agent unit tests: `cd agent && uv run pytest -q`.
+Set your OpenRouter key (create one at https://openrouter.ai/keys) in
+`agent/.env` and restart the agent. The key never reaches the browser.
 
-## Architecture (this slice)
+| Variable | Required | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | yes (for chat) | OpenRouter key for the text model |
+| `TEXT_MODEL` | no (default `openai/gpt-6-luna`) | Model id sent to OpenRouter |
+| `OPENROUTER_BASE_URL` | no (default `https://openrouter.ai/api/v1`) | Point the model at another OpenAI-compatible endpoint |
 
-```
-React SPA (Vite) :5173          LangGraph agent (FastAPI) :8123
-CopilotKitProvider ───────────▶ POST /copilotkit   (AG-UI SSE)
-  selfManagedAgents:              LangGraphAGUIAgent bi_agent
-  HttpAgent ──────────────────    single-node graph, streams
-CopilotSidebar (v2 chat)          TEXT_MESSAGE_* deltas
-                                  ChatOpenAI → OpenRouter
-```
+Every variable above exists in [`agent/.env.example`](agent/.env.example).
 
-The SPA connects **directly** to the agent — no Node runtime in between
-(PRD v1.1) — which is why the agent's CORS config allows
-`http://localhost:5173`.
+## Demo script
+
+TODO — scripted golden-path demo for reviewers, finalizing in a later issue.
+
+## Model swap guide
+
+TODO — swapping the model via `TEXT_MODEL` only (env change, no code), later issue.
