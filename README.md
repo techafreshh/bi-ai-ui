@@ -75,6 +75,7 @@ Set your OpenRouter key (create one at https://openrouter.ai/keys) in
 | `OPENROUTER_API_KEY` | yes (for chat) | OpenRouter key for the text model |
 | `TEXT_MODEL` | no (default `openai/gpt-6-luna`) | Model id sent to OpenRouter |
 | `OPENROUTER_BASE_URL` | no (default `https://openrouter.ai/api/v1`) | Point the model at another OpenAI-compatible endpoint |
+| `DECISION_THRESHOLD` | no (default `0.6`) | Min probability for `above_threshold` flagging on decision answers |
 
 Every variable above exists in [`agent/.env.example`](agent/.env.example).
 
