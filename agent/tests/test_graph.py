@@ -62,7 +62,7 @@ def _heuristic_client():
 
 
 def _run_sse(monkeypatch, message="Show me sales in Q3", chat_model=None,
-             decision_client=None):
+             decision_client=None, thread_id=None):
     """Run the full graph once through the real AG-UI adapter and return
     (raw SSE text, snapshots). Every snapshot's full state dict is parsed
     from the wire — nothing is poked behind the adapter.
@@ -71,7 +71,9 @@ def _run_sse(monkeypatch, message="Show me sales in Q3", chat_model=None,
     pins the deterministic heuristic so no key or live endpoint is needed.
     Tests that need a specific decider (the all-sub-threshold mock) pass
     their own — passed factories are never overwritten by the heuristic.
-    """
+    thread_id: the AG-UI thread the run joins; None (the default) starts a
+    fresh one. The Investigate drill-down (issue #16) reuses ONE thread
+    across two runs — the CTA posts the follow-up into the same chat."""
     if decision_client is not None:
         monkeypatch.setattr(agent_graph, "get_decision_client", decision_client)
     else:
@@ -84,7 +86,7 @@ def _run_sse(monkeypatch, message="Show me sales in Q3", chat_model=None,
         name="bi_agent", description="graph contract test", graph=agent_graph.graph
     )
     run_input = RunAgentInput(
-        thread_id=f"test-{uuid.uuid4()}",
+        thread_id=thread_id or f"test-{uuid.uuid4()}",
         run_id=f"run-{uuid.uuid4()}",
         state={},
         messages=[UserMessage(id="m1", role="user", content=message)],
@@ -148,6 +150,107 @@ def test_q3_query_streams_kpi_row_and_line_chart(seeded_db, monkeypatch):
     # The window is also visible on the streamed shared state, not just in
     # the component props.
     assert final["snapshot"]["window"]["range"] == Q3_RANGE
+
+
+# --- Issue #16 golden path B: churn spike drill-down and Investigate CTA ----- 
+
+
+def test_golden_churn_streams_callout_cause_and_cohort(seeded_db, monkeypatch):
+    """Clause 1: 'Why did churn spike in August?' streams a final a2ui whose
+    variance_callout carries delta > 0.2, a cause naming the planted pricing
+    change, and the issue's machine CTA id; its data_table holds 38..50 rows,
+    >= 80% of them Growth-segment, with row-key columns. Repeated runs
+    reproduce the same callout delta and 40-row cohort — deterministic SQL,
+    no model in the loop."""
+    first = None
+    for _ in range(3):
+        _, snapshots = _run_sse(monkeypatch, message="Why did churn spike in August?")
+        final = _final_state(snapshots)
+        items = final["a2ui"]["items"]
+        callouts = [i for i in items if i["type"] == "variance_callout"]
+        tables = [i for i in items if i["type"] == "data_table"]
+        assert callouts, items
+        props = callouts[0]["props"]
+        assert props["delta"] > 0.2, props
+        assert "pricing" in props["cause"], props
+        assert props["cta"] == agent_graph.INVESTIGATE_CTA, props
+        assert tables, items
+        table_props = tables[0]["props"]
+        assert 38 <= len(table_props["rows"]) <= 50, len(table_props["rows"])
+        growth_share = sum(
+            row["segment"] == "Growth" for row in table_props["rows"]
+        ) / len(table_props["rows"])
+        assert growth_share >= 0.8, growth_share
+        row_keys = set(table_props["rows"][0])
+        assert {"segment", "mrr", "tenure_months", "plan"} <= row_keys
+        assert set(table_props["columns"]) == row_keys
+        if first is None:
+            first = (props["delta"], len(table_props["rows"]))
+        else:
+            assert (props["delta"], len(table_props["rows"])) == first
+    assert first[0] == 1.0 and first[1] == 40  # the seed's pinned spike
+
+
+def test_golden_churn_noul_decision_carries_real_and_data_problem(
+    seeded_db, monkeypatch
+):
+    """Clause 3: the first churn response's decisions[] carries the noul
+    real_change_vs_data_problem decision with a {real, data_problem}
+    probability dict summing to 1.0 (+/- 0.05) and the pick naming the
+    argmax key."""
+    _, snapshots = _run_sse(monkeypatch, message="Why did churn spike in August?")
+    decisions = _final_state(snapshots)["decisions"]
+    matches = [
+        d for d in decisions
+        if d["id"] == agent_graph.questions.REAL_CHANGE_QUESTION_ID
+    ]
+    assert len(matches) == 1, decisions
+    decision = matches[0]
+    assert decision["type"] == "noul", decision
+    probabilities = decision["probabilities"]
+    assert isinstance(probabilities, dict), decision
+    assert set(probabilities) == {"real", "data_problem"}, decision
+    assert abs(sum(probabilities.values()) - 1.0) <= 0.05, decision
+    assert decision["pick"] in {"real", "data_problem"}, decision
+
+
+def test_investigate_followup_runs_cohort_drilldown(seeded_db, monkeypatch):
+    """Clause 2: after the churn question completes, a follow-up message
+    framed with the fixed Investigate prefix — the exact payload the CTA
+    sends (web/src/hooks/useInvestigate.tsx) — starts a second run on the
+    SAME thread whose refreshed a2ui references the cohort: a data_table
+    with a segment filter (all rows Growth, cancel dates present) and an
+    insight_text titled '... churn cohort ...' for that cohort."""
+    thread_id = f"test-{uuid.uuid4()}"
+    _, first_snapshots = _run_sse(
+        monkeypatch,
+        message="Why did churn spike in August?",
+        thread_id=thread_id,
+    )
+    first = _final_state(first_snapshots)
+    assert not first["snapshot"]["investigate"]
+
+    _, snapshots = _run_sse(
+        monkeypatch,
+        message=(
+            f"{agent_graph.INVESTIGATE_PREFIX} — Why did churn spike in August?"
+        ),
+        thread_id=thread_id,
+    )
+    final = _final_state(snapshots)
+    # The follow-up re-pins the same window (the framing carries the question).
+    assert final["snapshot"]["window"]["range"] == "2026-08-01..2026-08-31"
+    items = final["a2ui"]["items"]
+    tables = [i for i in items if i["type"] == "data_table"]
+    insights = [i for i in items if i["type"] == "insight_text"]
+    assert tables and insights, items
+    table_props = tables[0]["props"]
+    assert table_props["filters"] == ["segment"], table_props
+    assert len(table_props["rows"]) >= 1, table_props
+    for row in table_props["rows"]:
+        assert row["segment"] == "Growth", row
+        assert "cancelled_on" in row, row
+    assert "churn cohort" in insights[0]["props"]["title"], insights[0]["props"]
 
 
 # --- Acceptance clause 2: decisions[] shape -----------------------------------

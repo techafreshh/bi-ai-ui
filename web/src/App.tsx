@@ -5,6 +5,7 @@ import { DashboardCanvas } from "./components/DashboardCanvas";
 import { DecisionDrawer } from "./components/DecisionDrawer";
 import { ThemeToggle } from "./components/ui/theme-toggle";
 import { useDecisions } from "./hooks/useDecisions";
+import { InvestigateProvider } from "./hooks/useInvestigate";
 import { ThemeProvider } from "./lib/theme";
 
 // PRD v1.1: the provider talks to the agent's FastAPI endpoint directly —
@@ -38,9 +39,14 @@ function AppShell() {
           <ThemeToggle />
         </div>
       </header>
-      <main className="flex-1 p-8">
-        <DashboardCanvas />
-      </main>
+      {/* Issue #16: the Investigate CTA below appends+[re]runs the agent on
+          this provider's shared agent instance — the same instance the
+          sidebar chats on, so the drill-down lands on the visible thread. */}
+      <InvestigateProvider agentId={AGENT_ID}>
+        <main className="flex-1 p-8">
+          <DashboardCanvas />
+        </main>
+      </InvestigateProvider>
       <CopilotSidebar
         agentId={AGENT_ID}
         defaultOpen

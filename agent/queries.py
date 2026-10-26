@@ -29,6 +29,23 @@ after D is ever counted — point-in-time, never leaked):
     generator's design (cancel is the account's last event), so
     accounts.arr_cents needs no replay. `tenure_months` = days from
     created_at to the cancel date / 30.4375, rounded to 1 decimal.
+  * churn_driver(window, data_end, limit): the churn-spike facts behind the
+    variance callout's cause and the Investigate drill-down (issue #16).
+    The cohort window is (window.start, data_end) ONLY when the user's own
+    window already contains at least one repriced cancel (a 'cancel' in the
+    window with an 'upgrade' for the same account in
+    [window.start, cancel_date] — the data's repriced-churn signature);
+    otherwise the cohort stays (window.start, window.end), so an off-spike
+    question never lists cancels it did not ask about. Returned dict:
+    {cohort_start, cohort_end, spiked, cancelled, repriced, rows,
+    dominant_segment, dominant_share} — counts from one aggregate SQL over
+    the cohort window, `rows` reused from churn_cohort, the segment shares
+    computed in Python over those <= limit rows.
+  * churn_cohort_detail(window, segment, limit): the drill-down's row-level
+    cohort — one {segment, plan, mrr, tenure_months, cancelled_on,
+    repriced} row per cancel event (`repriced` the human-readable
+    'yes'/'no' form of the same repricing signature as churn_driver),
+    optionally filtered to one segment.
   * churn_delta(end, baseline_months): churn rate of a window W :=
     churned ARR in W (the churning accounts' accounts.arr_cents summed over
     'cancel' events in W) / active ARR at W's first day; a churn ON that
@@ -195,6 +212,56 @@ ORDER BY s.event_date, s.account_id
 LIMIT ?
 """
 
+# Churn-spike counts over a window (issue #16): every cancel in
+# [:start, :end] plus — per row — whether the SAME account has an 'upgrade'
+# (the repricing event of the planted pricing change) in
+# [:paired_from, cancel_date]. The repriced share of the cancelled rows is
+# the data-grounded fact the cause string claims; a window whose cancels
+# were never preceded by a repricing reads repriced = 0 and gets no cause.
+# Params: {"start", "end", "paired_from"}.
+_SQL_CHURN_REPRICED = """
+SELECT COUNT(*) AS cancelled,
+       SUM(CASE WHEN EXISTS (
+               SELECT 1 FROM subscription_events u
+               WHERE u.account_id = s.account_id
+                 AND u.event_type = 'upgrade'
+                 AND u.event_date >= :paired_from
+                 AND u.event_date <= s.event_date
+           ) THEN 1 ELSE 0 END) AS repriced
+FROM subscription_events s
+WHERE s.event_type = 'cancel'
+  AND s.event_date BETWEEN :start AND :end
+"""
+
+# The drill-down's row-level cohort (issue #16): _SQL_CHURN_COHORT plus the
+# cancel date itself, the churn-time plan and the repricing flag (same
+# signature as _SQL_CHURN_REPRICED, evaluated against the cohort window's
+# start). `:segment` is bound as None for "all segments" — a NULL parameter
+# short-circuits the OR, so one static template serves both shapes. Params:
+# {"start", "end", "paired_from", "segment", "limit"}.
+_SQL_CHURN_COHORT_DETAIL = """
+SELECT a.segment AS segment,
+       a.plan AS plan,
+       ROUND(a.arr_cents / 1200.0, 2) AS mrr,
+       ROUND((julianday(s.event_date) - julianday(a.created_at)) / 30.4375, 1)
+           AS tenure_months,
+       s.event_date AS cancelled_on,
+       CASE WHEN EXISTS (
+               SELECT 1 FROM subscription_events u
+               WHERE u.account_id = s.account_id
+                 AND u.event_type = 'upgrade'
+                 AND u.event_date >= :paired_from
+                 AND u.event_date <= s.event_date
+           ) THEN 'yes' ELSE 'no' END AS repriced
+FROM subscription_events s
+JOIN accounts a ON a.id = s.account_id
+WHERE s.event_type = 'cancel'
+  AND s.event_date BETWEEN :start AND :end
+  AND (:segment IS NULL OR a.segment = :segment)
+ORDER BY s.event_date, s.account_id
+LIMIT :limit
+"""
+
 # Churned ARR in a window: the churn-time ARR of every cancelling account
 # (one cancel event per account by construction). Params: (start, end).
 _SQL_CHURNED_ARR = """
@@ -346,6 +413,126 @@ def churn_cohort(window, limit=50):
             "mrr": row[1],
             "tenure_months": row[2],
             "plan": row[3],
+        }
+        for row in rows
+    ]
+
+
+def _repriced_counts(conn, start, end, paired_from):
+    """(cancelled, repriced) over the inclusive window: every 'cancel' in
+    [start, end], of those the rows whose account also has an 'upgrade' in
+    [paired_from, cancel_date]. One aggregate scan (see _SQL_CHURN_REPRICED)."""
+    cancelled, repriced = conn.execute(
+        _SQL_CHURN_REPRICED,
+        {"start": start, "end": end, "paired_from": paired_from},
+    ).fetchone()
+    # SUM over zero rows reads NULL, not 0 — the cancelled==0 case.
+    return cancelled, (repriced or 0)
+
+
+def _dominant_segment(rows):
+    """(segment, share) with the highest row count among the cohort `rows`
+    the table actually shows (ties broken by count, then lexicographically,
+    so the pick is deterministic whatever the segment mix); share is relative
+    to len(rows), rounded to 4 decimals, JSON-clean. No rows: (None, 0.0)."""
+    if not rows:
+        return None, 0.0
+    counts = {}
+    for row in rows:
+        segment = row["segment"]
+        counts[segment] = counts.get(segment, 0) + 1
+    segment, count = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0]
+    return segment, round(count / len(rows), 4)
+
+
+def churn_driver(window, data_end=None, limit=50):
+    """Churn-spike facts for the variance callout and the Investigate
+    drill-down (issue #16) over `window` (a (start, end) pair of ISO dates).
+
+    The spike signature is a repriced cancel: a 'cancel' in the window whose
+    account also has an 'upgrade' in [window.start, cancel_date] (the paired
+    repricing of the planted pricing change). When the user's own window
+    shows that signature (`spiked`), the cohort window extends from
+    window.start to `data_end` (the data's latest event day) when data_end
+    sits beyond the window, so the WHOLE spike cohort is tabled, not only
+    the part inside the literal window the user named; otherwise — no
+    repriced cancel, or no data_end beyond the window — the cohort stays
+    window-scoped and an off-spike question lists only what it asked for.
+
+    Returns {"cohort_start", "cohort_end", "spiked", "cancelled",
+    "repriced", "rows", "dominant_segment", "dominant_share"}: rows reused
+    from churn_cohort (at most `limit` >= 1), counts from aggregate SQL over
+    the cohort window, and the dominant segment/share computed over exactly
+    those visible rows (so the callout's claim never exceeds the table).
+    `data_end` must be None or an ISO date; anything else is ValueError
+    before any SQL runs."""
+    start, end = _require_window_tuple(window)
+    if data_end is not None:
+        data_end = _require_date(data_end, "data_end")
+    _require_int_at_least(limit, "limit", 1)
+
+    conn = db.connect(readonly=True)
+    try:
+        # Spike detection runs strictly inside the user's window: repriced
+        # cancels here are evidence the named window sits on the planted
+        # spike, never a promise about observations outside it.
+        _, window_repriced = _repriced_counts(conn, start, end, start)
+        spiked = window_repriced > 0
+        cohort_end = data_end if (spiked and data_end and data_end > end) else end
+        cancelled, repriced = _repriced_counts(conn, start, cohort_end, start)
+    finally:
+        conn.close()
+    rows = churn_cohort((start, cohort_end), limit=limit)
+    dominant_segment, dominant_share = _dominant_segment(rows)
+    return {
+        "cohort_start": start,
+        "cohort_end": cohort_end,
+        "spiked": spiked,
+        "cancelled": cancelled,
+        "repriced": repriced,
+        "rows": rows,
+        "dominant_segment": dominant_segment,
+        "dominant_share": dominant_share,
+    }
+
+
+def churn_cohort_detail(window, segment=None, limit=50):
+    """Row-level churn cohort for the Investigate drill-down (issue #16):
+    one {"segment", "plan", "mrr", "tenure_months", "cancelled_on",
+    "repriced"} dict per cancel event in the inclusive `window` (a (start,
+    end) pair of ISO dates), ordered by (event_date, account_id), at most
+    `limit` rows (>= 1). `segment` None means every segment; a value is
+    matched exactly (parameterized — never interpolated). `repriced` is the
+    portal-facing 'yes'/'no' spelling of churn_driver's repricing signature
+    (an 'upgrade' in [window.start, cancel_date]), because table cells render
+    via String(value) and a bare 0/1 would read as '0'."""
+    start, end = _require_window_tuple(window)
+    if segment is not None:
+        if not isinstance(segment, str) or not segment:
+            raise ValueError("segment must be None or a non-empty string")
+    _require_int_at_least(limit, "limit", 1)
+    conn = db.connect(readonly=True)
+    try:
+        rows = conn.execute(
+            _SQL_CHURN_COHORT_DETAIL,
+            {
+                "start": start,
+                "end": end,
+                "paired_from": start,
+                "segment": segment,
+                "limit": limit,
+            },
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "segment": row[0],
+            "plan": row[1],
+            "mrr": row[2],
+            "tenure_months": row[3],
+            "cancelled_on": row[4],
+            "repriced": row[5],
         }
         for row in rows
     ]

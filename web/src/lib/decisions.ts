@@ -8,11 +8,14 @@
 // survives extraction renders, the rest is skipped, nothing is thrown.
 
 // Keys verbatim from agent/graph.py's decide() output. `probabilities` is a
-// scalar in [0, 1] for noul/score answers and an {option: probability} dict
-// for choice answers. In the wire contract the parser only *enforces*
-// id/type; every other field is lenient so a partial record still renders
-// (missing latency_ms -> "n/a", missing model -> "n/a", missing pick ->
-// "picked: n/a").
+// scalar in [0, 1] for score answers (score questions read a confidence), a
+// scalar ALSO for a raw noul answer, or an {option: probability} dict for
+// choice answers — and, since issue #16, the real-change noul is re-stamped
+// server-side into the {real, data_problem} dict (summing to 1), so a noul
+// record renders one bar per side. In the wire contract the parser only
+// *enforces* id/type; every other field is lenient so a partial record still
+// renders (missing latency_ms -> "n/a", missing model -> "n/a", missing pick
+// -> "picked: n/a").
 export interface DecisionRecord {
   id: string;
   type: string;
