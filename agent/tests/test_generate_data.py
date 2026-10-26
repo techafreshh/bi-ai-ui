@@ -1,15 +1,18 @@
-"""Issue #3 acceptance-contract tests for the seeded data generator.
+"""Acceptance-contract tests for the seeded data generator (issues #3+#4).
 
-Each test maps to one acceptance clause of issue #3 or to an invariant the
-generator's docstring promises. The generator is driven through its real
-entrypoint (`scripts/generate_data.py`) as a subprocess — mirroring the
-runtime gate, which invokes the script itself — with `--db-path` redirecting
-output into temp dirs, per the subprocess idiom of test_server.py.
+Each test maps to one acceptance clause of issue #3 or #4, or to an
+invariant the generator's docstring promises. The generator is driven
+through its real entrypoint (`scripts/generate_data.py`) as a subprocess —
+mirroring the runtime gate, which invokes the script itself — with
+`--db-path` redirecting output into temp dirs, per the subprocess idiom of
+test_server.py.
 """
 
 import sqlite3
+import statistics
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -44,8 +47,11 @@ def _run_generator(db_path: Path) -> None:
 
 
 def _snapshot(db_path: Path) -> dict:
-    """Per-table row counts plus total revenue in cents (the cent-exact
-    determinism currency the issue pins)."""
+    """Per-table row counts, total revenue in cents (the issue-#3 cent-exact
+    determinism currency) and the issue-#4 planted-shape metrics (churn
+    cancel rows in the window, their Growth-segment count, and the
+    Startup-segment duplicate / null-amount usage rows inside the bug
+    window) — the numbers the rerun-identically acceptance clause pins."""
     conn = db.connect(db_path, readonly=True)
     try:
         counts = {
@@ -55,7 +61,41 @@ def _snapshot(db_path: Path) -> dict:
         total_revenue = conn.execute(
             "SELECT COALESCE(SUM(amount_cents), 0) FROM revenue_events"
         ).fetchone()[0]
-        return {"counts": counts, "total_revenue_cents": total_revenue}
+        churn_cancels = conn.execute(
+            "SELECT COUNT(*) FROM subscription_events "
+            "WHERE event_type = 'cancel' "
+            "AND event_date BETWEEN '2026-08-10' AND '2026-09-30'"
+        ).fetchone()[0]
+        churn_growth_count = conn.execute(
+            "SELECT COUNT(*) FROM subscription_events s "
+            "JOIN accounts a ON a.id = s.account_id "
+            "WHERE s.event_type = 'cancel' "
+            "AND s.event_date BETWEEN '2026-08-10' AND '2026-09-30' "
+            "AND a.segment = 'Growth'"
+        ).fetchone()[0]
+        startup_dup_rows = conn.execute(
+            "SELECT COALESCE(SUM(n - 1), 0) FROM ("
+            "  SELECT COUNT(*) AS n FROM usage_events u "
+            "  JOIN accounts a ON a.id = u.account_id "
+            "  WHERE u.event_date BETWEEN '2026-09-08' AND '2026-09-21' "
+            "  AND a.segment = 'Startup' "
+            "  GROUP BY u.account_id, u.event_date, u.units HAVING n > 1"
+            ")"
+        ).fetchone()[0]
+        startup_null_rows = conn.execute(
+            "SELECT COUNT(*) FROM usage_events u "
+            "JOIN accounts a ON a.id = u.account_id "
+            "WHERE u.event_date BETWEEN '2026-09-08' AND '2026-09-21' "
+            "AND a.segment = 'Startup' AND u.units IS NULL"
+        ).fetchone()[0]
+        return {
+            "counts": counts,
+            "total_revenue_cents": total_revenue,
+            "churn_cancels": churn_cancels,
+            "churn_growth_count": churn_growth_count,
+            "startup_dup_rows": startup_dup_rows,
+            "startup_null_rows": startup_null_rows,
+        }
     finally:
         conn.close()
 
@@ -173,6 +213,107 @@ def test_account_arr_equals_subscription_deltas(generated):
         assert mismatches == 0
     finally:
         conn.close()
+
+
+def test_churn_cohort_contract(generated):
+    """Acceptance (issue #4, churn shape): cancel events in
+    2026-08-10..2026-09-30 number 38–45, ≥80% of the churned accounts are
+    Growth-segment, the median tenure exceeds six months (183 days), and
+    every churned account carries the paired in-window "new plan" upgrade
+    dated on or before its zero-delta cancel marker."""
+    db_a, *_ = generated
+    conn = db.connect(db_a, readonly=True)
+    try:
+        cancels = conn.execute(
+            "SELECT s.account_id, s.event_date AS cancel_date, "
+            "       s.arr_delta_cents, a.segment, a.created_at, "
+            "       (SELECT COUNT(*) FROM subscription_events se "
+            "         WHERE se.account_id = s.account_id "
+            "           AND se.event_type = 'upgrade' "
+            "           AND se.event_date BETWEEN '2026-08-10' AND s.event_date) "
+            "           AS paired_upgrades "
+            "FROM subscription_events s "
+            "JOIN accounts a ON a.id = s.account_id "
+            "WHERE s.event_type = 'cancel' "
+            "  AND s.event_date BETWEEN '2026-08-10' AND '2026-09-30'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert 38 <= len(cancels) <= 45
+    growth = sum(row["segment"] == "Growth" for row in cancels)
+    assert growth >= 0.8 * len(cancels)
+    tenures = [
+        (date.fromisoformat(row["cancel_date"])
+         - date.fromisoformat(row["created_at"])).days
+        for row in cancels
+    ]
+    assert statistics.median(tenures) > 183
+    for row in cancels:
+        assert row["arr_delta_cents"] == 0  # 'cancel' is the churn marker
+        assert row["paired_upgrades"] >= 1  # the "new plan" precedes the churn
+
+
+def test_usage_ingest_bug_contract(generated):
+    """Acceptance (issue #4, ingest bug): inside the 2026-09-08..21 window
+    Startup rows are ≥5% exact duplicates (every duplicated group contains
+    exactly 2 rows) with >2% NULL amounts, while every other segment stays
+    below 0.5% on both metrics — the bug touches Startup rows only."""
+    db_a, *_ = generated
+    conn = db.connect(db_a, readonly=True)
+    try:
+        groups = conn.execute(
+            "SELECT a.segment AS segment, u.account_id, u.event_date, "
+            "       u.units, COUNT(*) AS n "
+            "FROM usage_events u JOIN accounts a ON a.id = u.account_id "
+            "WHERE u.event_date BETWEEN '2026-09-08' AND '2026-09-21' "
+            "GROUP BY a.segment, u.account_id, u.event_date, u.units"
+        ).fetchall()
+        distinct_metrics = conn.execute(
+            "SELECT COUNT(DISTINCT metric) FROM usage_events "
+            "WHERE event_date BETWEEN '2026-09-08' AND '2026-09-21'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert distinct_metrics == 1  # 'amount' is units; metric is constant
+    rows_in = {}
+    dup_rows = {}
+    null_rows = {}
+    max_group = {"Startup": 0}
+    for row in groups:
+        segment = row["segment"]
+        rows_in[segment] = rows_in.get(segment, 0) + row["n"]
+        if row["units"] is None:
+            null_rows[segment] = null_rows.get(segment, 0) + row["n"]
+        if row["n"] > 1:
+            dup_rows[segment] = dup_rows.get(segment, 0) + row["n"] - 1
+            max_group[segment] = max(max_group.get(segment, 0), row["n"])
+    startup_rows = rows_in["Startup"]
+    assert dup_rows["Startup"] / startup_rows >= 0.05
+    assert max_group["Startup"] == 2  # an exact duplicate appears twice
+    assert null_rows["Startup"] / startup_rows > 0.02
+    for segment in sorted(rows_in):
+        if segment == "Startup":
+            continue
+        assert dup_rows.get(segment, 0) < 0.005 * rows_in[segment]
+        assert null_rows.get(segment, 0) < 0.005 * rows_in[segment]
+
+
+def test_planted_shapes_rerun_identical(generated):
+    """Acceptance: rerunning the generator reproduces all three planted
+    shapes with identical counts — the Q3-2026 growth ramp is pinned by the
+    per-table counts plus test_q3_2026_net_new_arr_growth_shape; the churn
+    cohort and the ingest bug must match on a fresh second run and on a
+    rerun over the same path."""
+    _db_a, first, second, rerun = generated
+    for key in (
+        "churn_cancels", "churn_growth_count", "startup_dup_rows", "startup_null_rows",
+    ):
+        assert first[key] == second[key] == rerun[key], key
+    # The shapes are present at all (a vacuous 0/0 equality proves nothing).
+    assert 38 <= first["churn_cancels"] <= 45
+    assert first["churn_growth_count"] == first["churn_cancels"]
+    assert first["startup_dup_rows"] > 0
+    assert first["startup_null_rows"] > 0
 
 
 def test_db_helper_contract(tmp_path):
