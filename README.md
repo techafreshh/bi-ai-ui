@@ -18,9 +18,9 @@ React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
                                                      │
                                                      ▼
                                       ┌───────────────────────────┐
-                                      │ SQLite — planned          │
-                                      │ (seeded demo data, PRD §7;│
-                                      │ not in the skeleton yet)  │
+                                      │ SQLite — data/app.db      │
+                                      │ deterministic seeded mock │
+                                      │ accounts + daily events   │
                                       └───────────────────────────┘
 ```
 
@@ -29,8 +29,14 @@ React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
   (`agent/server.py`).
 - The agent is a single LangGraph `chat` node streaming an OpenRouter
   text model as an OpenAI-compatible endpoint (`agent/graph.py`).
-- SQLite persistence is planned for the data phase (PRD §7); both services
-  run from `docker-compose.yml` (web dev server :5173, agent :8123).
+- Mock B2B-SaaS data lives in `data/app.db` (gitignored), generated
+  deterministically by `python agent/scripts/generate_data.py`: ~5–8k
+  accounts plus 24 months (2024-10-01 → 2026-09-30) of daily
+  `subscription_events` / `revenue_events` / `usage_events` with a planted
+  Q3-2026 net-new-ARR growth ramp; the schema is documented in the script's
+  docstring and opened via `agent/db.py`.
+- Both services run from `docker-compose.yml` (web dev server :5173,
+  agent :8123).
 
 ## Quickstart
 
