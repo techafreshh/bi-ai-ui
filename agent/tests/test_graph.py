@@ -5,13 +5,13 @@ LangGraphAGUIAgent → ag-ui EventEncoder SSE — over the real graph with the
 heuristics standing in for both models (no OpenRouter key needed), and
 parses every STATE_SNAPSHOT off the wire. Each test names the acceptance
 clause it proves; the seeded DB comes from the generator's real entrypoint
-per the session-fixture idiom of test_queries.py.
+as the suite-wide shared seed (one subprocess run per pytest session,
+provided by tests/conftest.py with a module-scoped DEFAULT_DB_PATH
+swap-restore per consumer).
 """
 
 import asyncio
 import json
-import subprocess
-import sys
 import uuid
 from pathlib import Path
 
@@ -27,33 +27,7 @@ import db
 import graph as agent_graph
 from decision.client import DecisionClient, MockTransport
 
-AGENT_DIR = Path(__file__).resolve().parents[1]
-GENERATOR = AGENT_DIR / "scripts" / "generate_data.py"
-RUN_TIMEOUT_SECONDS = 600
-
 Q3_RANGE = "2026-07-01..2026-09-30"
-
-
-@pytest.fixture(scope="session")
-def seeded_db(tmp_path_factory):
-    """One seeded temp DB for the session; while it is in place the graph's
-    query layer (db.DEFAULT_DB_PATH) reads the seeded data (restored after).
-    Same idiom as test_queries.py / test_quality.py."""
-    db_path = tmp_path_factory.mktemp("graph") / "seeded.db"
-    result = subprocess.run(
-        [sys.executable, str(GENERATOR), "--db-path", str(db_path)],
-        cwd=AGENT_DIR,
-        capture_output=True,
-        text=True,
-        timeout=RUN_TIMEOUT_SECONDS,
-    )
-    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-    original = db.DEFAULT_DB_PATH
-    db.DEFAULT_DB_PATH = db_path
-    try:
-        yield db_path
-    finally:
-        db.DEFAULT_DB_PATH = original
 
 
 def _heuristic_client():
