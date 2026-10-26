@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -10,5 +11,10 @@ export default defineConfig({
     host: true,
     port: 5173,
     strictPort: true,
+  },
+  // Issue #11: the A2UI contract tests run in the same pipeline as the
+  // build — jsdom so @testing-library/react can mount the renderer.
+  test: {
+    environment: "jsdom",
   },
 });
