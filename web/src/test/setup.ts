@@ -14,25 +14,24 @@ class IntersectionObserverStub {
   readonly thresholds: ReadonlyArray<number> = [];
   constructor(private readonly callback: IntersectionObserverCallback) {}
   observe(target: Element): void {
-    // Report as intersecting on the next microtask, matching the async shape
-    // of the real observer so effects that await it still settle.
-    queueMicrotask(() => {
-      // jsdom has no getBoundingClientRect content, so report a visible box.
-      this.callback(
-        [
-          {
-            isIntersecting: true,
-            target,
-            intersectionRatio: 1,
-            time: 0,
-            boundingClientRect: target.getBoundingClientRect(),
-            intersectionRect: target.getBoundingClientRect(),
-            rootBounds: null,
-          } as unknown as IntersectionObserverEntry,
-        ],
-        this as unknown as IntersectionObserver,
-      );
-    });
+    // Report as intersecting SYNCHRONOUSLY: an async (microtask) entry would
+    // schedule React state updates outside act(), leaving the first rendered
+    // frame stale. Motion's useInView then flips in the same commit and the
+    // component settles on its final frame before render() returns.
+    this.callback(
+      [
+        {
+          isIntersecting: true,
+          target,
+          intersectionRatio: 1,
+          time: 0,
+          boundingClientRect: target.getBoundingClientRect(),
+          intersectionRect: target.getBoundingClientRect(),
+          rootBounds: null,
+        } as unknown as IntersectionObserverEntry,
+      ],
+      this as unknown as IntersectionObserver,
+    );
   }
   unobserve(): void {}
   disconnect(): void {}
@@ -50,31 +49,31 @@ Object.defineProperty(window, "IntersectionObserver", {
 class ResizeObserverStub {
   constructor(private readonly callback: ResizeObserverCallback) {}
   observe(target: Element): void {
-    // Fixed 1024x768 content box: chart containers get a deterministic size.
-    queueMicrotask(() => {
-      this.callback(
-        [
-          {
-            target,
-            contentRect: {
-              width: 1024,
-              height: 768,
-              x: 0,
-              y: 0,
-              top: 0,
-              left: 0,
-              right: 1024,
-              bottom: 768,
-              toJSON: () => ({}),
-            } as DOMRectReadOnly,
-            borderBoxSize: [],
-            contentBoxSize: [],
-            devicePixelContentBoxSize: [],
-          } as unknown as ResizeObserverEntry,
-        ],
-        this as unknown as ResizeObserver,
-      );
-    });
+    // Synchronous, as above: Recharts' ResponsiveContainer measures inside
+    // its own effect, so the chart renders its 1024x768 layout in the same
+    // act flush and the SVG exists before assertions run.
+    this.callback(
+      [
+        {
+          target,
+          contentRect: {
+            width: 1024,
+            height: 768,
+            x: 0,
+            y: 0,
+            top: 0,
+            left: 0,
+            right: 1024,
+            bottom: 768,
+            toJSON: () => ({}),
+          } as DOMRectReadOnly,
+          borderBoxSize: [],
+          contentBoxSize: [],
+          devicePixelContentBoxSize: [],
+        } as unknown as ResizeObserverEntry,
+      ],
+      this as unknown as ResizeObserver,
+    );
   }
   unobserve(): void {}
   disconnect(): void {}
@@ -89,9 +88,15 @@ Object.defineProperty(window, "ResizeObserver", {
 Object.defineProperty(window, "matchMedia", {
   writable: true,
   configurable: true,
+  // motion-dom initializes its reduced-motion global with the bare query
+  // "(prefers-reduced-motion)" while the CSS idiom is ": reduce"; both must
+  // answer true, and the "no-preference" complement must answer false —
+  // animations then take their instant reduced path in every test.
   value: (query: string): MediaQueryList =>
     ({
-      matches: query.includes("prefers-reduced-motion: reduce"),
+      matches:
+        query.includes("prefers-reduced-motion") &&
+        !query.includes("no-preference"),
       media: query,
       onchange: null,
       addListener: () => {},

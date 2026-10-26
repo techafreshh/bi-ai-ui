@@ -1,12 +1,11 @@
 @import "tailwindcss";
-
-// Issue #12: class-based dark mode driving the shadcn-style token stack the
-// beUI copies were written against (bg-background, border-border, text-muted-
-// foreground, ring-ring, ...). The variant targets html.dark, which the
-// ThemeProvider (web/src/lib/theme.tsx) toggles; @theme inline maps each
-// token to a utility-friendly --color-* so v4 compiles every class the
-// beUI Card/Alert/Number/Table copies use — an unknown one would fail the
-// build, which is exactly the missing-token check.
+/* Issue #12: class-based dark mode driving the shadcn-style token stack the */
+/* beUI copies were written against (bg-background, border-border, text-muted- */
+/* foreground, ring-ring, ...). The variant targets html.dark, which the */
+/* ThemeProvider (web/src/lib/theme.tsx) toggles; @theme inline maps each */
+/* token to a utility-friendly --color-* so v4 compiles every class the */
+/* beUI Card/Alert/Number/Table copies use — an unknown one would fail the */
+/* build, which is exactly the missing-token check. */
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
@@ -59,10 +58,9 @@ body,
 #root {
   height: 100%;
 }
-
-// Theme observability contract (issue #12 acceptance): the toggled provider
-// flips these two custom properties on :root, so the page background visibly
-// changes under both document.body[data-theme] and html.dark.
+/* Theme observability contract (issue #12 acceptance): the toggled provider */
+/* flips these two custom properties on :root, so the page background visibly */
+/* changes under both document.body[data-theme] and html.dark. */
 body {
   margin: 0;
   font-family:

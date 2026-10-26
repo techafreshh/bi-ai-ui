@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCurrency, formatDelta, formatScore } from "./format";
+import { formatCurrency, formatDelta, formatScore, humanizeKey } from "./format";
 
 describe("formatCurrency", () => {
   it("renders millions with two decimals and the $M suffix", () => {
@@ -41,5 +41,21 @@ describe("formatScore", () => {
     expect(formatScore(0.95)).toBe("95%");
     expect(formatScore(1)).toBe("100%");
     expect(formatScore(0)).toBe("0%");
+  });
+});
+
+describe("humanizeKey", () => {
+  it("title-cases snake_case keys", () => {
+    expect(humanizeKey("account")).toBe("Account");
+    expect(humanizeKey("null_scope")).toBe("Null Scope");
+  });
+
+  it("keeps known domain acronyms uppercase", () => {
+    expect(humanizeKey("mrr")).toBe("MRR");
+    expect(humanizeKey("net_new_arr")).toBe("Net New ARR");
+  });
+
+  it("returns the empty string for separators only", () => {
+    expect(humanizeKey("_-")).toBe("");
   });
 });

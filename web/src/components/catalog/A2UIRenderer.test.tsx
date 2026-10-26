@@ -10,7 +10,6 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { A2UIRenderer } from "./A2UIRenderer";
-
 beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -41,10 +40,13 @@ describe("A2UIRenderer (acceptance: unknown type degrades, never errors)", () =>
     );
   });
 
-  it("renders a known type with valid props as its catalog placeholder, silently", () => {
+  it("renders a known type as its real catalog component, silently", () => {
     render(<A2UIRenderer items={[KPI_ROW_ITEM]} />);
-    expect(screen.getByTestId("catalog-placeholder-kpi_row")).toBeTruthy();
-    expect(screen.getByText("kpi_row")).toBeTruthy();
+    const root = screen.getByTestId("catalog-kpi_row");
+    // The acceptance KPI, formatted by the real component (issue #12).
+    expect(root.textContent).toContain("Net-new ARR");
+    expect(root.textContent).toContain("$1.20M");
+    expect(root.textContent).toContain("+18%");
     expect(console.error).not.toHaveBeenCalled();
   });
 
@@ -77,7 +79,7 @@ describe("A2UIRenderer (acceptance: unknown type degrades, never errors)", () =>
 });
 
 describe("A2UIRenderer (layout path)", () => {
-  it("renders the PRD §10 layout as one placeholder per item, silently", () => {
+  it("renders the PRD §10 layout as one real component per item, silently", () => {
     render(
       <A2UIRenderer
         layout={{
@@ -91,8 +93,8 @@ describe("A2UIRenderer (layout path)", () => {
         }}
       />,
     );
-    expect(screen.getByTestId("catalog-placeholder-kpi_row")).toBeTruthy();
-    expect(screen.getByTestId("catalog-placeholder-insight_text")).toBeTruthy();
+    expect(screen.getByTestId("catalog-kpi_row")).toBeTruthy();
+    expect(screen.getByTestId("catalog-insight_text")).toBeTruthy();
     expect(console.error).not.toHaveBeenCalled();
   });
 

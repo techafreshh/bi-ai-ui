@@ -1,6 +1,7 @@
 import { CopilotKitProvider, CopilotSidebar } from "@copilotkit/react-core/v2";
 import { HttpAgent } from "@ag-ui/client";
 import "@copilotkit/react-core/v2/styles.css";
+import { DashboardCanvas } from "./components/DashboardCanvas";
 import { DecisionDrawer } from "./components/DecisionDrawer";
 import { ThemeToggle } from "./components/ui/theme-toggle";
 import { useDecisions } from "./hooks/useDecisions";
@@ -28,7 +29,8 @@ function AppShell() {
         <div>
           <h1 className="text-lg font-semibold">bi-ai-ui</h1>
           <p className="text-sm text-muted-foreground">
-            Walking skeleton — chat round-trip to the LangGraph agent
+            Demo canvas — six catalog components on beUI cards, fixture-driven
+            until the agent streams a layout
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -36,14 +38,8 @@ function AppShell() {
           <ThemeToggle />
         </div>
       </header>
-      <main className="flex flex-1 items-center justify-center p-8">
-        <div className="max-w-md rounded-xl border border-border bg-card p-6 text-center shadow-sm">
-          <h2 className="mb-2 text-base font-medium">Dashboard canvas</h2>
-          <p className="text-sm text-muted-foreground">
-            Components will assemble here in later phases. Use the sidebar to
-            chat with the agent — try sending &ldquo;ping&rdquo;.
-          </p>
-        </div>
+      <main className="flex-1 p-8">
+        <DashboardCanvas />
       </main>
       <CopilotSidebar
         agentId={AGENT_ID}

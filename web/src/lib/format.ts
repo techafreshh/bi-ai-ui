@@ -35,3 +35,19 @@ export function formatScore(score: number): string {
   if (!Number.isFinite(score)) return "—";
   return `${Math.round(score * 100)}%`;
 }
+
+// Wire keys are snake_case agent-side ("account", "mrr", "nulls"); headers
+// deserve title case, with the domain's known acronyms kept uppercase.
+const ACRONYMS = new Set(["arr", "mrr", "cac", "ltv", "id", "sku"]);
+
+export function humanizeKey(key: string): string {
+  return key
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((word) =>
+      ACRONYMS.has(word.toLowerCase())
+        ? word.toUpperCase()
+        : word.charAt(0).toUpperCase() + word.slice(1),
+    )
+    .join(" ");
+}
