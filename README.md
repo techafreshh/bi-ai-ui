@@ -19,6 +19,25 @@ Type a message in the chat sidebar; the reply streams from the OpenRouter text
 model via the agent (round-trip: browser → CopilotKit/AG-UI → LangGraph →
 OpenRouter).
 
+## Packaging note: `web/dist` is committed
+
+The built SPA bundle (`web/dist/`) is committed on purpose: the Docker web
+image is a thin nginx static server, so a fresh `docker compose up` only pulls
+small base images and never runs npm/node — this keeps the one-command boot
+to seconds even on slow networks. After editing anything under `web/src`,
+regenerate and commit the bundle:
+
+```bash
+cd web && npm install && npm run build && git add dist
+```
+
+For iterative development use the dev server instead (hot reload, no rebuild
+needed):
+
+```bash
+cd web && npm install && npm run dev   # Vite dev server on http://localhost:5173
+```
+
 ## Without Docker
 
 ```bash
@@ -54,5 +73,5 @@ cd web && npm ci && npm run dev
 
 ```bash
 docker compose run --rm agent uv run --no-sync pytest -q   # agent contract tests
-cd web && npm run build                                    # typecheck + bundle
+cd web && npm run build                                    # typecheck + bundle (refresh web/dist)
 ```
