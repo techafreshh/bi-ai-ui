@@ -12,10 +12,13 @@ state to CopilotKit (issue #10).
     fanned out through DecisionClient.decide (the #8 seam) over the wired
     transport (#9's OpenRouter chain when a key is configured, the
     deterministic HeuristicTransport otherwise, issue #18's guard when the
-    query names no data domain). Transport failures or unparsable answers
-    fall back to a fresh heuristic client, so `decisions` always carries
-    1..7 entries stamped with {id, type, probabilities, pick, model,
-    latency_ms}.
+    query names no data domain; DECISION_MODEL_CHOICE/NOUL/SCORE, issue
+    #19, route a question type to its own decision model). Transport
+    failures or unparsable answers fall back to a fresh heuristic client,
+    so `decisions` always carries 1..7 entries stamped with {id, type,
+    probabilities, pick, model, latency_ms} — model attributed per answer
+    from the transport's declaration, then the type's override, then
+    DECISION_MODEL, never a guessed value.
   * layout — assembles a complete, valid draft of above-threshold catalog
     components from the snapshot and cuts it with
     catalog.filter_layout(items, probs, threshold); nothing surviving falls
@@ -215,14 +218,18 @@ class _TimedTransport:
         return merged
 
 
-def _model_label(transport) -> str:
-    """Which model answered: a transport-declared label first (the heuristic
-    declares "heuristic", the #9 transports declare their model), then the
-    DECISION_MODEL env (the fallback chain's own default), so decisions
+def _decision_model_label(transport, answer_type) -> str:
+    """Which model answered one answer: a transport-declared label first (the
+    heuristic declares "heuristic", the #9 transports declare their model),
+    then the answer type's DECISION_MODEL_<TYPE> override (issue #19), then
+    the DECISION_MODEL env (the fallback chain's own default) — so decisions
     never store a guessed value as fact."""
     declared = getattr(transport, "model", None)
     if isinstance(declared, str) and declared:
         return declared
+    override = decision_client.per_type_model(answer_type)
+    if override:
+        return override
     return os.getenv("DECISION_MODEL", decision_client.DEFAULT_DECISION_MODEL)
 
 
@@ -429,7 +436,6 @@ async def decide(state: AgentState) -> dict:
             )
 
     elapsed_ms = timed.timing_by_id()
-    model = _model_label(timed)
     decisions = []
     for answer in answers:
         probabilities, pick = _real_change_probabilities(answer)
@@ -439,7 +445,7 @@ async def decide(state: AgentState) -> dict:
                 "type": answer.type,
                 "probabilities": probabilities,
                 "pick": pick,
-                "model": model,
+                "model": _decision_model_label(timed, answer.type),
                 "latency_ms": round(elapsed_ms.get(answer.id, 0.0), 2),
                 "above_threshold": answer.above_threshold,
             }
