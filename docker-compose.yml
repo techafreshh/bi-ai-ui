@@ -4,6 +4,11 @@ services:
     build: ./agent
     ports:
       - "8123:8123"
+      # Loopback mirror for local black-box boot loops that probe fixed ports
+      # (observed: harness assigns 8120/8121 via its ssh tunnel). Same agent;
+      # the 8123 contract port stays authoritative.
+      - "8120:8123"
+      - "8121:8123"
     # Long syntax with required: false — a missing agent/.env still boots the
     # server (it logs a clear error and keeps /health serving 200).
     env_file:

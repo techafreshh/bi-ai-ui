@@ -20,6 +20,14 @@ def test_health_returns_exact_contract(client: TestClient) -> None:
     assert r.json() == {"status": "ok"}
 
 
+def test_listen_port_honors_port_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The server binds $PORT when the environment assigns one; else 8123."""
+    monkeypatch.setenv("PORT", "8120")
+    assert server._listen_port() == 8120
+    monkeypatch.delenv("PORT", raising=False)
+    assert server._listen_port() == 8123
+
+
 def test_cors_preflight_allows_spa_origin(client: TestClient) -> None:
     """Preflight from the SPA origin against /copilotkit is allowed."""
     r = client.options(

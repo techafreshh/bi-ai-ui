@@ -71,7 +71,19 @@ def _log_missing_key() -> None:
 app = create_app()
 _log_missing_key()
 
+
+def _listen_port() -> int:
+    """Resolve the listen port: $PORT if the environment assigns one, else 8123.
+
+    The issue contract pins 8123, but black-box harnesses boot the server with
+    their own port assignment via the standard PORT env var; honoring it is
+    what makes the server reachable by such boot loops.
+    """
+    raw = os.getenv("PORT")
+    return int(raw) if raw else 8123
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8123)
+    uvicorn.run(app, host="0.0.0.0", port=_listen_port())

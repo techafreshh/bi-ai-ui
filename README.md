@@ -56,6 +56,7 @@ cd web && npm ci && npm run dev
 |---|---|---|
 | `OPENROUTER_API_KEY` | `agent/.env` (server-side only, gitignored) | OpenRouter API key. Without it the agent boots, logs a clear error, and still serves `/health`; chat fails until a key is set. |
 | `TEXT_MODEL` | `agent/.env` | OpenRouter chat model id (default `openai/gpt-6-luna`). |
+| `PORT` | environment | Port the agent binds when run directly (`python server.py` / `uvicorn`). Default `8123`. The SPA dev server honors it for its own port too (default `5173`). |
 
 ## Architecture notes
 
@@ -63,6 +64,9 @@ cd web && npm ci && npm run dev
   the SPA's `CopilotKitProvider` points at `http://localhost:8123/copilotkit`
   directly from the browser (no separate Node CopilotKit runtime). The FastAPI
   `CORSMiddleware` allows exactly the Vite dev origin `http://localhost:5173`.
+  A directly-run agent (`python server.py`) additionally honors a `PORT` env
+  override, and `docker-compose.yml` mirrors the agent on the loopback ports
+  8120/8121 used by local boot loops — keep 8123 as the contract port.
 - **zod v3 pin**: the CopilotKit quickstart pins zod v3 for SDK compatibility;
   we pin the v3 line (`^3.25.76`) — unversioned installs pull zod v4, which does
   not satisfy the CopilotKit SDK peers.
