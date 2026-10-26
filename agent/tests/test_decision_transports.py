@@ -256,6 +256,57 @@ def test_fallback_engages_on_decisions_failure(monkeypatch, caplog):
     asyncio.run(client.transport.aclose())
 
 
+def test_request_timeout_triggers_bounded_fallback(monkeypatch, caplog):
+    """Issue #20 (timeout drops): a request that hits the transport-level
+    DECISION_TIMEOUT_S timeout — httpx.ReadTimeout on /decisions — is
+    wrapped into TransportError ("decisions endpoint request failed"),
+    retried exactly MAX_ATTEMPTS_PER_TRANSPORT (2) times on the primary,
+    then the chat fallback answers. The timeout is raised as an exception,
+    never a real sleep, so the test carries zero wall-clock sensitivity."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    hits = {"decisions": 0, "chat": 0}
+
+    def handler(request):
+        if request.url.path == "/decisions":
+            hits["decisions"] += 1
+            raise httpx.ReadTimeout("mock read timeout")
+        hits["chat"] += 1
+        return httpx.Response(200, json=_chat_body(_canon_answers()))
+
+    client = decision.DecisionClient(
+        decision.FallbackChainTransport(
+            [
+                decision.DecisionsModalityTransport(
+                    base_url="http://timeout.test",
+                    http_client=_mock_client(handler),
+                ),
+                decision.ChatStructuredTransport(
+                    models=["m-good"],
+                    base_url="http://timeout.test",
+                    http_client=_mock_client(handler),
+                ),
+            ]
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger=DECISION_LOGGER):
+        answers = asyncio.run(client.decide(_canonical_questions()))
+
+    # 2 bounded attempts against the timing-out endpoint, then one chat call.
+    assert hits == {"decisions": 2, "chat": 1}
+    assert [a.id for a in answers] == ["which-components", "is-data-problem"]
+    assert [a.type for a in answers] == ["choice", "noul"]
+    assert answers[0].above_threshold is False  # top canon choice prob 0.43
+    assert answers[1].probabilities == pytest.approx(0.92)
+    warnings_text = " | ".join(
+        record.getMessage() for record in caplog.records
+    )
+    # Every attempt's timeout is wrapped and warned, naming the endpoint.
+    assert "decisions endpoint request failed" in warnings_text
+    assert "DecisionsModalityTransport" in warnings_text
+    asyncio.run(client.transport.aclose())
+
+
 def test_chat_transport_walks_model_chain_bounded(monkeypatch):
     """Acceptance clause 3 (no infinite retries): with every endpoint 401ing,
     the chain exhausts after exactly 2 decisions + 4 chat requests (2 models
