@@ -38,6 +38,10 @@ React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
   and cancel through 2026-09-30), and a Sept 8–21 ingest bug (exact
   duplicates plus NULL-amount usage rows, Startup segment only); the schema
   is documented in the script's docstring and opened via `agent/db.py`.
+  `agent/quality.py` runs the freshness / duplicates / nulls data-quality
+  checks over an inclusive date scope (default: the trailing 30 days ending
+  at the latest observed event day), returning `{name, status, score}` rows
+  for the "Is the data clean?" card.
 - Both services run from `docker-compose.yml` (web dev server :5173,
   agent :8123).
 
