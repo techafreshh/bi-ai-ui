@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 import decision
+from decision.client import DEFAULT_DECISION_MODEL, DEFAULT_FALLBACK_MODELS
 
 AGENT_DIR = Path(__file__).resolve().parents[1]
 DECISION_LOGGER = "bi-ai-ui.agent.decision"
@@ -381,3 +382,196 @@ def test_parse_contract_snapshot_yields_answers_for_every_question_id(monkeypatc
     noul = mapping["is-data-problem"]["probabilities"]
     assert not isinstance(noul, bool) and isinstance(noul, (int, float))
     assert 0.0 <= noul <= 1.0
+
+
+# --- Issue #19: per-type model overrides and the TypeRoutedTransport ---------
+
+
+def _router_questions():
+    """One question per type (choice + an extra choice to prove partition
+    batching) for the TypeRoutedTransport tests."""
+    return [
+        decision.ChoiceQuestion(id="q-choice", prompt="pick?", options=["a", "b"]),
+        decision.NoulQuestion(id="q-noul", prompt="yes?"),
+        decision.ScoreQuestion(id="q-score", prompt="rate?"),
+        decision.ChoiceQuestion(id="q-choice-two", prompt="pick again?", options=["a", "b"]),
+    ]
+
+
+def _answers_for(questions):
+    """Valid PRD §10 answers echoing each wire question (dict probabilities
+    for choice, 0.9 for noul/score) — what the mock /decisions endpoint
+    replies no matter which type partition reached it."""
+    return {
+        "answers": [
+            {
+                "id": q["id"],
+                "type": q["type"],
+                "probabilities": (
+                    {option: 0.9 for option in q["options"]}
+                    if q["type"] == "choice"
+                    else 0.9
+                ),
+            }
+            for q in questions
+        ]
+    }
+
+
+def test_per_type_model_reads_override_env(monkeypatch):
+    """Issue #19: per_type_model returns the stripped override string per
+    type, reads None for unset, empty or whitespace-only values (an emptied
+    .env line degrades to DECISION_MODEL, never wires a broken model string)
+    and None for unknown question types."""
+    for var in ("DECISION_MODEL_CHOICE", "DECISION_MODEL_NOUL", "DECISION_MODEL_SCORE"):
+        monkeypatch.delenv(var, raising=False)
+    assert decision.per_type_model("choice") is None
+    assert decision.per_type_model("noul") is None
+    assert decision.per_type_model("score") is None
+    assert decision.per_type_model("brand_new_kind") is None
+
+    monkeypatch.setenv("DECISION_MODEL_CHOICE", "  override/model  ")
+    assert decision.per_type_model("choice") == "override/model"
+    monkeypatch.setenv("DECISION_MODEL_CHOICE", "   ")
+    assert decision.per_type_model("choice") is None
+    monkeypatch.setenv("DECISION_MODEL_CHOICE", "")
+    assert decision.per_type_model("choice") is None
+
+
+def test_build_decision_client_plain_wiring_is_structurally_unchanged(monkeypatch):
+    """Issue #19 (byte-identical no-override path): with all three per-type
+    overrides unset, build_decision_client returns the exact #9 wiring — a
+    FallbackChainTransport of DecisionsModalityTransport +
+    ChatStructuredTransport, no router in between."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    for var in ("DECISION_MODEL_CHOICE", "DECISION_MODEL_NOUL", "DECISION_MODEL_SCORE"):
+        monkeypatch.delenv(var, raising=False)
+
+    client = decision.build_decision_client()
+    assert isinstance(client.transport, decision.FallbackChainTransport)
+    primary, fallback = client.transport.transports
+    assert isinstance(primary, decision.DecisionsModalityTransport)
+    assert primary.model == DEFAULT_DECISION_MODEL
+    assert isinstance(fallback, decision.ChatStructuredTransport)
+    asyncio.run(client.transport.aclose())
+
+
+def test_build_decision_client_wires_per_type_routes(monkeypatch):
+    """Issue #19 (factory wiring): each SET override gets its own fallback
+    chain whose primary /decisions transport carries that model string,
+    routed under a TypeRoutedTransport whose default stays the plain
+    DECISION_MODEL chain; the chat fallback chain still walks
+    DECISION_FALLBACK_MODELS for every route."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("DECISION_MODEL", raising=False)
+    monkeypatch.delenv("DECISION_FALLBACK_MODELS", raising=False)
+    monkeypatch.setenv("DECISION_MODEL_CHOICE", "x/y")
+    monkeypatch.setenv("DECISION_MODEL_NOUL", "")  # empty counts as unset
+    monkeypatch.setenv("DECISION_MODEL_SCORE", "z/w")
+
+    client = decision.build_decision_client()
+    router = client.transport
+    assert isinstance(router, decision.TypeRoutedTransport)
+    assert set(router.routes) == {"choice", "score"}
+    for question_type, model in (("choice", "x/y"), ("score", "z/w")):
+        chain = router.routes[question_type]
+        assert isinstance(chain, decision.FallbackChainTransport), question_type
+        assert chain.transports[0].model == model, question_type
+        assert isinstance(chain.transports[1], decision.ChatStructuredTransport)
+        assert chain.transports[1].models == list(DEFAULT_FALLBACK_MODELS)
+    # noul had no (usable) override: it falls to the plain default chain.
+    default_chain = router.default
+    assert isinstance(default_chain, decision.FallbackChainTransport)
+    assert default_chain.transports[0].model == DEFAULT_DECISION_MODEL
+    asyncio.run(client.transport.aclose())
+
+
+def test_build_decision_client_requires_key_for_router_too(monkeypatch):
+    """Issue #19 (wiring policy unchanged): per-type overrides do not bypass
+    the fail-loud missing-key rule — a set override with no key still raises
+    RuntimeError at construction."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DECISION_MODEL_CHOICE", "x/y")
+    with pytest.raises(RuntimeError) as exc:
+        decision.build_decision_client()
+    assert "OPENROUTER_API_KEY" in str(exc.value)
+
+
+def test_type_routed_transport_partitions_by_type_and_merges(monkeypatch):
+    """Issue #19 (runtime behavior): one ask_batch over a mixed
+    choice/noul/score set is partitioned by type — the choice partition's
+    /decisions wire body carries the override model "x/y", score's carries
+    "z/w", the unrouted noul partition carries the default's model — each
+    partition is one HTTP call, and the merged mapping answers every
+    question in the original order through DecisionClient.decide."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    requests = []
+
+    def handler(request):
+        body = json.loads(request.content.decode())
+        requests.append((request.url.path, body["model"], [q["id"] for q in body["questions"]]))
+        return httpx.Response(200, json=_answers_for(body["questions"]))
+
+    def make(model):
+        return decision.DecisionsModalityTransport(
+            model=model,
+            base_url="http://route.test",
+            http_client=_mock_client(handler),
+        )
+
+    questions = _router_questions()
+    router = decision.TypeRoutedTransport(
+        {"choice": make("x/y"), "score": make("z/w")},
+        make("stub/default"),
+    )
+    answers = asyncio.run(
+        decision.DecisionClient(router, threshold=0.6).decide(questions)
+    )
+
+    # One request per partition, in first-question order: choice first, then
+    # the unrouted noul partition (default), then score.
+    assert requests == [
+        ("/decisions", "x/y", ["q-choice", "q-choice-two"]),
+        ("/decisions", "stub/default", ["q-noul"]),
+        ("/decisions", "z/w", ["q-score"]),
+    ]
+    assert [a.id for a in answers] == ["q-choice", "q-noul", "q-score", "q-choice-two"]
+    assert answers[0].probabilities == {"a": 0.9, "b": 0.9}
+    assert answers[1].probabilities == pytest.approx(0.9)
+    assert answers[3].above_threshold is True
+
+
+def test_type_routed_transport_closes_every_subtransport():
+    """Issue #19 (resource contract): aclose() closes the routed transports
+    AND the default, mirroring FallbackChainTransport — no leaked clients
+    when the graph rewires."""
+
+    class ClosingBatch:
+        def __init__(self):
+            self.closed = False
+
+        async def ask_batch(self, questions):
+            return {}
+
+        async def aclose(self):
+            self.closed = True
+
+    routed, default = ClosingBatch(), ClosingBatch()
+    router = decision.TypeRoutedTransport({"choice": routed}, default)
+    asyncio.run(router.aclose())
+    assert routed.closed and default.closed
+
+
+def test_type_routed_transport_requires_routes_and_default():
+    """Issue #19 (fail-loud wiring): an empty routes mapping or a default-less
+    router raises ValueError at construction — coverage gaps are wiring bugs,
+    never silent per-request surprises."""
+
+    class Anything:
+        async def ask_batch(self, questions):
+            return {}
+
+    with pytest.raises(ValueError):
+        decision.TypeRoutedTransport({}, Anything())
+    with pytest.raises(ValueError):
+        decision.TypeRoutedTransport({"choice": Anything()}, None)

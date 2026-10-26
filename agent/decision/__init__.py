@@ -6,8 +6,8 @@ MockTransport, NoulQuestion, Question, ScoreQuestion, top_probability
 (plus DEFAULT_THRESHOLD, issue #9's MAX_ATTEMPTS_PER_TRANSPORT); and
 from issue #9 TransportError,
 DecisionsModalityTransport, ChatStructuredTransport, FallbackChainTransport
-and build_decision_client — so consumers can import the whole seam from one
-place.
+and build_decision_client, plus issue #19's TypeRoutedTransport and
+per_type_model — so consumers can import the whole seam from one place.
 
 Dual-import contract, mirroring agent/quality.py: this package imports
 both as `agent.decision` from the repo root (package-style runtime probes)
@@ -24,7 +24,9 @@ try:  # package-style entry (import agent.decision from the repo root)
         FallbackChainTransport,
         MockTransport,
         TransportError,
+        TypeRoutedTransport,
         build_decision_client,
+        per_type_model,
     )
     from agent.decision.schemas import (
         Answer,
@@ -44,7 +46,9 @@ except ModuleNotFoundError:  # script-style entry (import decision from agent/)
         FallbackChainTransport,
         MockTransport,
         TransportError,
+        TypeRoutedTransport,
         build_decision_client,
+        per_type_model,
     )
     from decision.schemas import (
         Answer,
