@@ -86,12 +86,28 @@ Set your OpenRouter key (create one at https://openrouter.ai/keys) in
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | yes (for chat) | OpenRouter key for the text model |
-| `TEXT_MODEL` | no (default `openai/gpt-6-luna`) | Model id sent to OpenRouter |
-| `OPENROUTER_BASE_URL` | no (default `https://openrouter.ai/api/v1`) | Point the model at another OpenAI-compatible endpoint |
-| `DECISION_THRESHOLD` | no (default `0.6`) | Min probability for `above_threshold` flagging on decision answers |
+| `OPENROUTER_API_KEY` | yes (for chat) | OpenRouter key for the text model; without it the agent still boots, the decider falls back to its heuristic transport and fill writes KPI-grounded copy |
+| `TEXT_MODEL` | no (default `openai/gpt-6-luna`) | Chat model the fill node streams the narrative from |
+| `OPENROUTER_BASE_URL` | no (default `https://openrouter.ai/api/v1`) | OpenAI-compatible endpoint the text model and both decision transports POST to |
+| `DECISION_MODEL` | no (default `~perplexity/pplx-decider-flash-latest`) | Decisions-modality model the primary decision transport POSTs to; shown verbatim as `decisions[].model` |
+| `DECISION_MODEL_CHOICE` | no (default empty) | Per-type `DECISION_MODEL` override for choice questions only; empty or whitespace = use `DECISION_MODEL` |
+| `DECISION_MODEL_NOUL` | no (default empty) | Per-type `DECISION_MODEL` override for noul questions only; empty or whitespace = use `DECISION_MODEL` |
+| `DECISION_MODEL_SCORE` | no (default empty) | Per-type `DECISION_MODEL` override for score questions only; empty or whitespace = use `DECISION_MODEL` |
+| `DECISION_FALLBACK_MODELS` | no (default `inception/mercury-decide:free,openai/gpt-6-luna`) | Comma-separated chat-completions fallback chain (json_schema structured output) |
+| `DECISION_THRESHOLD` | no (default `0.6`) | Min probability for `above_threshold` flagging on decision answers; below it the component is cut from the layout |
+| `DECISION_TIMEOUT_S` | no (default `8.0`) | Per-request timeout in seconds for both decision transports |
+| `AGENT_HOST` | no (default `0.0.0.0`) | Bind host for `python server.py` (the `--host` default), read ahead of `HOST` |
+| `HOST` | no (default `0.0.0.0`) | Fallback bind host when `AGENT_HOST` is unset or empty |
+| `AGENT_PORT` | no (default `8123`) | Bind port for `python server.py` (the `--port` default), read ahead of `PORT` |
+| `PORT` | no (default `8123`) | Fallback bind port when `AGENT_PORT` is unset or empty |
 
-Every variable above exists in [`agent/.env.example`](agent/.env.example).
+Every variable above exists in [`agent/.env.example`](agent/.env.example)
+with its default as the value, so copying the file is behavior-neutral.
+Changes apply when the agent (re)starts: `docker compose up -d agent`
+picks up an edited `agent/.env` by recreating the container — no rebuild,
+no code edits. Per-type overrides left empty fall back to `DECISION_MODEL`,
+and each decision's `model` field names the model that actually answered
+it (the heuristic fallback reports `"heuristic"`, never a guessed string).
 
 ## Demo script
 
@@ -99,4 +115,25 @@ TODO — scripted golden-path demo for reviewers, finalizing in a later issue.
 
 ## Model swap guide
 
-TODO — swapping the model via `TEXT_MODEL` only (env change, no code), later issue.
+Zero-code swap — edit `agent/.env` only, then recreate the agent (no image
+rebuild):
+
+```bash
+# in agent/.env — the relevant lines:
+# swap the decision model (visible in the drawer's decisions[].model):
+DECISION_MODEL=inception/mercury-decide:free
+# or override one question type only (choice / noul / score):
+DECISION_MODEL_CHOICE=inception/mercury-decide:free
+# swap the narrative (text) model:
+TEXT_MODEL=openai/gpt-6-luna
+# retire components below a stricter endorsement line:
+DECISION_THRESHOLD=0.95
+```
+
+```bash
+docker compose up -d agent   # recreate with the edited .env
+```
+
+Then ask a question: the Decision drawer shows the active model strings
+per decision, and `docker compose exec agent printenv DECISION_MODEL`
+confirms the compose-provided value without rebuilding the image.
