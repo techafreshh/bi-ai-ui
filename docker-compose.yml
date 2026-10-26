@@ -1,0 +1,17 @@
+services:
+  agent:
+    build: ./agent
+    ports:
+      - "8123:8123"
+    # Long syntax with required: false so the agent still boots (and keeps
+    # /health on 200) without agent/.env — only chat needs the key.
+    env_file:
+      - path: ./agent/.env
+        required: false
+
+  web:
+    build: ./web
+    ports:
+      - "5173:5173"
+    depends_on:
+      - agent
