@@ -18,7 +18,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_TEXT_MODEL = "openai/gpt-6-luna"
 _NO_KEY_MESSAGE = (
-    "OPENROUTER_API_KEY is not set. Copy .env.example to agent/.env, add your "
+    "OPENROUTER_API_KEY is not set. Copy agent/.env.example to agent/.env, add your "
     "OpenRouter key, and restart the agent."
 )
 
