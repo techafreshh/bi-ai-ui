@@ -1,15 +1,74 @@
 @import "tailwindcss";
 
+// Issue #12: class-based dark mode driving the shadcn-style token stack the
+// beUI copies were written against (bg-background, border-border, text-muted-
+// foreground, ring-ring, ...). The variant targets html.dark, which the
+// ThemeProvider (web/src/lib/theme.tsx) toggles; @theme inline maps each
+// token to a utility-friendly --color-* so v4 compiles every class the
+// beUI Card/Alert/Number/Table copies use — an unknown one would fail the
+// build, which is exactly the missing-token check.
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: oklch(0.985 0.002 247.839);
+  --foreground: oklch(0.208 0.042 265.755);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.208 0.042 265.755);
+  --muted: oklch(0.968 0.007 247.896);
+  --muted-foreground: oklch(0.554 0.046 257.417);
+  --border: oklch(0.929 0.013 255.508);
+  --border-strong: oklch(0.869 0.022 252.894);
+  --primary: oklch(0.546 0.245 262.881);
+  --primary-foreground: oklch(0.985 0.002 247.839);
+  --destructive: oklch(0.577 0.245 27.325);
+  --ring: oklch(0.704 0.04 256.788);
+}
+
+.dark {
+  --background: oklch(0.208 0.042 265.755);
+  --foreground: oklch(0.968 0.007 247.896);
+  --card: oklch(0.279 0.041 260.031);
+  --card-foreground: oklch(0.968 0.007 247.896);
+  --muted: oklch(0.279 0.041 260.031);
+  --muted-foreground: oklch(0.704 0.04 256.788);
+  --border: oklch(0.371 0.037 259.733);
+  --border-strong: oklch(0.446 0.043 257.281);
+  --primary: oklch(0.623 0.214 259.815);
+  --primary-foreground: oklch(0.968 0.007 247.896);
+  --destructive: oklch(0.704 0.191 22.216);
+  --ring: oklch(0.554 0.046 257.417);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-destructive: var(--destructive);
+  --color-ring: var(--ring);
+}
+
 html,
 body,
 #root {
   height: 100%;
 }
 
+// Theme observability contract (issue #12 acceptance): the toggled provider
+// flips these two custom properties on :root, so the page background visibly
+// changes under both document.body[data-theme] and html.dark.
 body {
   margin: 0;
   font-family:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica,
     Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
+  background-color: var(--background);
+  color: var(--foreground);
 }
