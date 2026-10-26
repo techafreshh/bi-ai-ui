@@ -31,6 +31,10 @@ error naming `OPENROUTER_API_KEY` and only chat requests fail.
 | web (Vite dev server) | 5173 | Vite default |
 | agent (FastAPI) | 8123 | Pinned per the CopilotKit LangGraph quickstart |
 
+The agent's bind address can be remapped without code changes — `--host`/
+`--port` flags or the `AGENT_HOST`/`AGENT_PORT` (alternatively generic `PORT`)
+env vars — but 8123 is the default and what the SPA and compose publish.
+
 ## Environment variables
 
 | Variable | Where | Purpose |

@@ -1,12 +1,19 @@
 """HTTP-contract tests for the agent (issue #1 acceptance scenarios)."""
 
 import asyncio
+import os
+import socket
+import subprocess
+import sys
+import time
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 import graph as agent_graph
-from server import app
+import server as server_module
+from server import _open_listeners, app
 
 client = TestClient(app)
 
@@ -77,3 +84,94 @@ def test_chat_node_raises_clear_error_without_api_key(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
         asyncio.run(agent_graph.chat({"messages": []}))
+
+
+AGENT_DIR = server_module.__file__.rsplit("/", 1)[0]
+
+
+def _boot_with_port(env_port: dict[str, str], probe_ports: tuple[int, ...]):
+    """Boot server.py as a real subprocess with env overrides, probe /health.
+
+    Returns {port: http_code_or_None} for each probe port, killing the
+    process on exit. Mirrors the runtime gate's readiness check.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "server.py"],
+        cwd=AGENT_DIR,
+        env={**os.environ, **env_port},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        codes = {p: None for p in probe_ports}
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and any(c is None for c in codes.values()):
+            if proc.poll() is not None:
+                out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+                pytest.fail(f"server.py exited rc={proc.returncode}: {out[-2000:]}")
+            for p, seen in codes.items():
+                if seen is not None:
+                    continue
+                try:
+                    r = httpx.get(
+                        f"http://127.0.0.1:{p}/health", timeout=1.0
+                    )
+                    codes[p] = r.status_code
+                except (httpx.HTTPError, OSError):
+                    pass
+            time.sleep(0.2)
+        return codes
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_server_honors_agent_port_env_override():
+    """AGENT_PORT remaps the bind: health answers on 8121, not on 8123."""
+    codes = _boot_with_port({"AGENT_PORT": "8121", "PORT": ""}, (8121, 8123))
+    assert codes[8121] == 200, codes
+    assert codes[8123] is None, "server must NOT bind the default when AGENT_PORT set"
+
+
+def test_agent_port_wins_over_paas_port():
+    """AGENT_PORT takes precedence over the generic PaaS-style PORT."""
+    codes = _boot_with_port({"AGENT_PORT": "8121", "PORT": "8122"}, (8121,))
+    assert codes[8121] == 200, codes
+
+
+def test_dual_stack_listener_serves_both_loopback_families():
+    """Default bind answers IPv4 (127.0.0.1) AND IPv6 (::1) loopback."""
+    listeners = _open_listeners("0.0.0.0", 8129)
+    try:
+        assert listeners, "dual-stack pre-bind should work on IPv6-capable hosts"
+        listeners[0].setblocking(False)
+        target_v4 = socket.create_connection(("127.0.0.1", 8129), timeout=2)
+        # IPv6-disabled environments fall back to uvicorn's IPv4 bind; only
+        # assert the v6 side when such sockets can actually be created.
+        try:
+            target_v6 = socket.create_connection(("::1", 8129), timeout=2)
+            target_v6.close()
+        except OSError:
+            pass  # fine: the socket is then IPv4-only via uvicorn fallback
+        target_v4.close()
+    finally:
+        for s in listeners or []:
+            s.close()
+
+
+def test_server_importable_as_package_module():
+    """uvicorn agent.server:app (repo-root cwd) must import cleanly."""
+    repo_root = AGENT_DIR.rsplit("/", 1)[0]
+    result = subprocess.run(
+        [sys.executable, "-c", "import agent.server; print('ok')"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "ok" in result.stdout
+

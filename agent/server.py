@@ -5,8 +5,10 @@ agent/main.py: load .env first, build the app, self-defined /health that
 returns exactly {"status": "ok"}, then the AG-UI endpoint.
 """
 
+import argparse
 import logging
 import os
+import socket
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -27,13 +29,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from ag_ui_langgraph import add_langgraph_fastapi_endpoint
 from copilotkit import LangGraphAGUIAgent
 
-from graph import graph
+try:  # package-style entry (uvicorn agent.server:app from the repo root)
+    from agent.graph import graph
+except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/)
+    from graph import graph
 
 logger = logging.getLogger("bi-ai-ui.agent")
 
 AGENT_NAME = "bi_agent"
 SPA_ORIGIN = "http://localhost:5173"
-AGENT_PORT = 8123
+# Issue contract pins 8123 as the default; --host/--port flags and the
+# AGENT_[HOST|PORT]/PORT env vars exist so harnesses and platform deploys can
+# remap the bind without code changes.
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 8123
 _NO_KEY_LOG = (
     "OPENROUTER_API_KEY is not set (agent/.env). /health keeps serving 200, "
     "but chat requests will fail until a key is provided."
@@ -81,9 +90,46 @@ if not os.getenv("OPENROUTER_API_KEY"):
     logger.error(_NO_KEY_LOG)
 
 
-def main():
-    """Run the uvicorn server."""
-    uvicorn.run("server:app", host="0.0.0.0", port=AGENT_PORT)
+def _open_listeners(host: str, port: int) -> list[socket.socket] | None:
+    """Pre-bind listening sockets, preferring a dual-stack IPv6 socket.
+
+    A single AF_INET6 socket with IPV6_V6ONLY=0 answers both ::1 and
+    127.0.0.1, so loopback probes succeed regardless of the client's
+    address family. Without IPv6 support (or for a custom host) return
+    None and let uvicorn do its regular bind.
+    """
+    if host not in ("0.0.0.0", "::", ""):
+        return None
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.bind(("::", port))
+        sock.listen(128)
+        sock.set_inheritable(True)
+        return [sock]
+    except OSError:
+        return None
+
+
+def main() -> None:
+    """Run the uvicorn server (blocks until the loop exits)."""
+    parser = argparse.ArgumentParser(description="bi-ai-ui agent server")
+    parser.add_argument(
+        "--host",
+        default=os.getenv("AGENT_HOST") or os.getenv("HOST") or DEFAULT_HOST,
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(
+            os.getenv("AGENT_PORT") or os.getenv("PORT") or DEFAULT_PORT
+        ),
+    )
+    args = parser.parse_args()
+
+    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.Server(config).run(sockets=_open_listeners(args.host, args.port))
 
 
 if __name__ == "__main__":
