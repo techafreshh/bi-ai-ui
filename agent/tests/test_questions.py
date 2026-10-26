@@ -60,6 +60,42 @@ def test_no_period_falls_back_to_complete_quarter_of_data_end():
     ) == ("2026-07-01", "2026-09-30")
 
 
+# --- resolve_window: explicit date-range template (issue #15) -----------------
+
+
+def test_explicit_date_range_is_honored_verbatim():
+    """The strictest template wins (issue #15): a well-formed ISO date
+    range in the message is returned exactly as the user bounded it —
+    never re-anchored on data_end, never clipped to a quarter."""
+    assert questions.resolve_window(
+        "sales from 2026-07-01 to 2026-09-30", data_end="2026-09-30"
+    ) == ("2026-07-01", "2026-09-30")
+    assert questions.resolve_window(
+        "revenue 2025-04-10..2025-05-02", data_end="2026-09-30"
+    ) == ("2025-04-10", "2025-05-02")
+
+
+def test_malformed_or_out_of_order_range_is_ignored():
+    """A range the date parser rejects (out-of-order bounds) or that no
+    calendar day satisfies (out-of-calendar bounds) is ignored without
+    raising: the relative templates take over and the window lands on
+    data_end's complete quarter."""
+    assert questions.resolve_window(
+        "sales 2026-09-30 to 2026-07-01", data_end="2026-09-30"
+    ) == ("2026-07-01", "2026-09-30")
+    assert questions.resolve_window(
+        "sales 2026-13-40 to 2026-07-01", data_end="2026-09-30"
+    ) == ("2026-07-01", "2026-09-30")
+
+
+def test_explicit_range_beats_period_word_in_the_same_message():
+    """When a period word (Q3) and an explicit range both appear, the
+    explicit bounds win — no silent re-anchoring to the full quarter."""
+    assert questions.resolve_window(
+        "Q3 trends 2026-07-01..2026-09-15", data_end="2026-09-30"
+    ) == ("2026-07-01", "2026-09-15")
+
+
 def test_missing_data_end_still_resolves_a_quarter_window():
     """Degrade contract: data_end=None (unreadable DB) falls back to the
     wall-clock anchor — still a well-formed quarter-aligned window."""

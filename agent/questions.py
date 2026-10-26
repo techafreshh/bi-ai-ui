@@ -1,15 +1,19 @@
 """Natural-language domain logic for the decide node (issue #10).
 
 `resolve_window` turns the user's message into the display window every
-node works on: a regex scan for quarters (Q1..Q4) and month names with an
-optional explicit year, anchored on the data's own latest event day —
+node works on: a template scan for explicit ISO date ranges first (issue
+#15 — the strictest template the user supplied wins, tried before the
+relative period templates), then quarters (Q1..Q4) and month names with
+an optional explicit year, anchored on the data's own latest event day —
 never a wall clock, so the same message + same seed always yields the same
-ISO range. An explicit year is honored verbatim even when it lies outside
-the data (the user asked for that window; the components just render empty
-series); a year-omitted period that is still incomplete relative to
-data_end backs off one year (the latest complete occurrence). No match
-falls back to the complete quarter containing data_end — "show me sales"
-still gets a sane, deliberate window. Model-inferred windows were
+ISO range. An explicit year — or an explicit date range — is honored
+verbatim even when it lies outside the data (the user asked for that
+window; the components just render empty series); a year-omitted period
+that is still incomplete relative to data_end backs off one year (the
+latest complete occurrence) while a malformed or out-of-order range is
+ignored, never raised. No match falls back to the complete quarter
+containing data_end — "show me sales" still gets a sane, deliberate
+window. Model-inferred windows were
 deliberately rejected: non-deterministic, an extra round trip, and issue
 #10's acceptance pins the exact ISO range for the seeded Q3 query.
 
@@ -83,6 +87,17 @@ _MONTH_RE = re.compile(
     r"\b(" + "|".join(_MONTH_NAMES) + r")\b(?:\s*[,']?\s*(20\d{2}))?",
     re.IGNORECASE,
 )
+
+# Issue #15 golden path A: explicit ISO date ranges ("2026-07-01..2026-09-30",
+# "from X to Y", em/en dash, "through") are the strictest window template —
+# the user's own bounds win over every relative period template regardless of
+# position in the message. Malformed or out-of-order bounds are ignored (the
+# relative templates then apply), never raised; this is a pure regex, never a
+# model call, so the window stays deterministic regardless of the model.
+_RANGE_RE = re.compile(
+    r"\b(\d{4}-\d{2}-\d{2})\s*(?:\.\.\.|\.\.|—|–|\bto\b|\bthrough\b)\s*(\d{4}-\d{2}-\d{2})\b",
+    re.IGNORECASE,
+)
 _MONTH_NUMBERS = {
     name: index + 1
     for index, names in enumerate(
@@ -152,12 +167,18 @@ def previous_quarter(window):
 def resolve_window(text, *, data_end):
     """Resolve the user's message to a display window of ISO dates.
 
-    text: the raw user message; scanned for a quarter (Q1..Q4) or a month
-        name, each with an optional explicit year — the earliest match in
-        the text wins.
+    text: the raw user message; scanned strictest-template-first: an
+        explicit ISO date range (_RANGE_RE) when well-formed, then a
+        quarter (Q1..Q4) or a month name, each with an optional explicit
+        year — the earliest relative match in the text wins.
     data_end: the data's latest event day (ISO string) or None — the anchor
         for year resolution and the fallback window. None (no readable DB)
         falls back to today's wall clock so the graph still resolves.
+
+    Range rules: an explicit date range is honored verbatim — even outside
+    the data (the components just render empty series) and even next to a
+    period word, which it outranks; a malformed or out-of-order range is
+    ignored (never raised) and the relative templates apply instead.
 
     Year rules: an explicit year is honored verbatim (even outside the
     data); a year-omitted period anchored on data_end backs off one year
@@ -168,6 +189,20 @@ def resolve_window(text, *, data_end):
     """
     anchor = date.fromisoformat(data_end) if data_end else date.today()
     text = text or ""
+
+    # The strictest template wins (issue #15): explicit user bounds outrank
+    # the relative period templates, wherever the two appear in the text.
+    range_match = _RANGE_RE.search(text)
+    if range_match:
+        try:
+            range_start = date.fromisoformat(range_match.group(1))
+            range_end = date.fromisoformat(range_match.group(2))
+        except ValueError:
+            pass  # out-of-calendar bounds: no template, fall through
+        else:
+            if range_start <= range_end:
+                return range_start.isoformat(), range_end.isoformat()
+            # Out-of-order bounds are ignored like any malformed template.
 
     matches = []
     quarter_match = _QUARTER_RE.search(text)
@@ -264,7 +299,16 @@ def build_question_set(query_text, snapshot):
             id=CATALOG_QUESTION_ID,
             prompt=(
                 context
-                + "Which catalog components does the answer to this query "
+                # Routing guide (issue #15): steer the golden queries to
+                # their component pairs. Kept AFTER the quoted user
+                # message — the heuristic's quoted_prompt keys on the
+                # FIRST quoted span, so no quote may precede it.
+                + "Routing guide: sales/revenue/ARR questions about a period "
+                "need kpi_row and line_chart together; churn/why questions "
+                "need variance_callout and data_table; data-cleanliness "
+                "questions need data_quality_card; anything without data "
+                "support gets insight_text. "
+                "Which catalog components does the answer to this query "
                 "need? Give a probability in [0, 1] for each option."
             ),
             options=list(CATALOG_TYPES),

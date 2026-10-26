@@ -25,9 +25,9 @@ state to CopilotKit (issue #10).
     checks, churn cohort rows, churn delta), merged back into `a2ui` and
     re-validated before storing.
   * fill — exactly ONE text-model call writing the narrative into
-    `a2ui.slotCopy` ("kpis.title", "insight_text.body", "summary"),
-    streamed via model.astream so token deltas still reach the chat. Any
-    model error (including a missing OPENROUTER_API_KEY, which
+    `a2ui.slotCopy` ("kpis.title", "line_chart.title", "insight_text.body",
+    "summary"), streamed via model.astream so token deltas still reach the
+    chat. Any model error (including a missing OPENROUTER_API_KEY, which
     build_chat_model raises lazily) degrades to deterministic copy from the
     KPIs, keeping the run green.
 
@@ -642,6 +642,7 @@ def _deterministic_copy(snapshot):
     )
     return {
         "kpis.title": f"{range_label}: net-new ARR {net_new:,.0f}",
+        "line_chart.title": f"ARR trend ({range_label})",
         "insight_text.body": (
             f"Across {range_label}, net-new ARR reached ${net_new:,.0f} with "
             f"MRR at ${mrr:,.0f} and {accounts} active accounts (NRR {nrr:.2f})."
@@ -669,6 +670,8 @@ def _fill_messages(snapshot):
                 "Write dashboard copy grounded ONLY in these numbers. Reply with a "
                 "JSON object and nothing else, with exactly these keys:\n"
                 '- "kpis.title": a headline of at most 8 words about these KPIs;\n'
+                '- "line_chart.title": a short chart title of at most 6 words '
+                "naming the metric and window;\n"
                 '- "insight_text.body": 2-3 sentences of narrative for the insight '
                 "card;\n"
                 '- "summary": one plain-text sentence for the chat reply.'
