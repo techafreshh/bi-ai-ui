@@ -325,8 +325,11 @@ def test_module_imports_both_styles():
     quality.py / server.py — and both entries expose the re-exported
     public surface."""
     exports = (
-        "Answer, ChoiceQuestion, DecisionClient, MockTransport, "
-        "NoulQuestion, Question, ScoreQuestion, top_probability"
+        "Answer, ChatStructuredTransport, DecisionClient, "
+        "DecisionsModalityTransport, DEFAULT_THRESHOLD, "
+        "FallbackChainTransport, MAX_ATTEMPTS_PER_TRANSPORT, MockTransport, "
+        "NoulQuestion, Question, ScoreQuestion, TransportError, "
+        "build_decision_client, top_probability"
     )
     package_style = subprocess.run(
         [sys.executable, "-c", f"from agent.decision import {exports}"],
