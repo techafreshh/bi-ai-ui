@@ -41,7 +41,9 @@ def build_chat_model() -> ChatOpenAI:
     return ChatOpenAI(
         model=os.getenv("TEXT_MODEL", DEFAULT_TEXT_MODEL),
         api_key=api_key,
-        base_url=OPENROUTER_BASE_URL,
+        # Default is OpenRouter; overridable so tests can point at a fake
+        # OpenAI-compatible server and verify the whole streaming path.
+        base_url=os.getenv("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL),
         streaming=True,
     )
 

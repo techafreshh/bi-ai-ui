@@ -37,6 +37,7 @@ error naming `OPENROUTER_API_KEY` and only chat requests fail.
 |---|---|---|
 | `OPENROUTER_API_KEY` | `agent/.env` (server-side only, gitignored) | OpenRouter key for the text model |
 | `TEXT_MODEL` | `agent/.env` | Model id, default `openai/gpt-6-luna` |
+| `OPENROUTER_BASE_URL` | `agent/.env` (optional) | Override to point at another OpenAI-compatible endpoint; default `https://openrouter.ai/api/v1` |
 
 ## Dependency pins worth knowing
 
