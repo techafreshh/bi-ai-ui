@@ -42,3 +42,39 @@ def test_missing_api_key_raises_clear_error(
     graph = importlib.import_module("graph")
     with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY is not set"):
         graph._build_model()
+
+
+def test_run_round_trip_streams_text_events(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full AG-UI round-trip with a fake model: RUN_STARTED -> TEXT_MESSAGE_*
+    -> RUN_FINISHED (the same wire the browser HttpAgent consumes)."""
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    graph = importlib.import_module("graph")
+    fake_model = GenericFakeChatModel(messages=iter([AIMessage(content="pong reply")]))
+    monkeypatch.setattr(graph, "_build_model", lambda: fake_model)
+
+    payload = {
+        "threadId": "t1",
+        "runId": "r1",
+        "state": {},
+        "tools": [],
+        "context": [],
+        "forwardedProps": {},
+        "messages": [{"id": "m1", "role": "user", "content": "ping"}],
+    }
+    with client.stream(
+        "POST",
+        "/copilotkit",
+        json=payload,
+        headers={"Origin": "http://localhost:5173", "Accept": "text/event-stream"},
+    ) as response:
+        assert response.status_code == 200
+        body = "".join(response.iter_text())
+
+    assert '"type":"RUN_STARTED"' in body
+    assert '"type":"TEXT_MESSAGE_CONTENT"' in body
+    assert "pong" in body
+    assert '"type":"RUN_FINISHED"' in body
