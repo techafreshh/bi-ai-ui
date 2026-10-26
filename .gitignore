@@ -10,6 +10,7 @@ data/
 node_modules/
 .next/
 out/
+web/dist/
 
 # Python
 __pycache__/
@@ -17,7 +18,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Factory/session state (never part of the product)
+.pdf-sessions/
+.zcode/
+
 # OS/editor
 .DS_Store
-
-.zcode/

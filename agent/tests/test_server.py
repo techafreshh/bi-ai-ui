@@ -1,0 +1,44 @@
+"""Black-box contract tests for the walking skeleton (no OpenRouter calls)."""
+
+import importlib
+
+import pytest
+from fastapi.testclient import TestClient
+
+import server
+
+
+@pytest.fixture()
+def client() -> TestClient:
+    return TestClient(server.app)
+
+
+def test_health_returns_exact_contract(client: TestClient) -> None:
+    """GET /health -> 200 with body exactly {"status": "ok"}."""
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
+def test_cors_preflight_allows_spa_origin(client: TestClient) -> None:
+    """Preflight from the SPA origin against /copilotkit is allowed."""
+    r = client.options(
+        "/copilotkit",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_missing_api_key_raises_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without OPENROUTER_API_KEY the graph's chat node raises a clear error."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    graph = importlib.import_module("graph")
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY is not set"):
+        graph._build_model()

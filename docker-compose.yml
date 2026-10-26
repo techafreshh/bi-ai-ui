@@ -1,0 +1,18 @@
+# One-command local demo: `docker compose up` (PRD §8 — docker-compose for infra).
+services:
+  agent:
+    build: ./agent
+    ports:
+      - "8123:8123"
+    # Long syntax with required: false — a missing agent/.env still boots the
+    # server (it logs a clear error and keeps /health serving 200).
+    env_file:
+      - path: ./agent/.env
+        required: false
+
+  web:
+    build: ./web
+    ports:
+      - "5173:5173"
+    depends_on:
+      - agent

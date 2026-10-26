@@ -1,0 +1,24 @@
+[project]
+name = "bi-ai-agent"
+version = "0.1.0"
+description = "LangGraph FastAPI agent serving the bi-ai-ui CopilotKit endpoint"
+requires-python = ">=3.12"
+dependencies = [
+    # CopilotKit Python SDK provides LangGraphAGUIAgent (start-compatible with ag-ui-langgraph 0.0.44).
+    "copilotkit==0.1.96",
+    # 0.0.43 breaks copilotkit==0.1.96; 0.0.44 is the fixed pin per the CopilotKit langgraph-fastapi starter.
+    "ag-ui-langgraph[fastapi]==0.0.44",
+    "ag-ui-protocol==0.1.22",
+    "langchain==1.4.0",
+    "langchain-openai==1.1.9",
+    "openai==1.109.1",
+    "langgraph==1.2.11",
+    "fastapi>=0.115.12,<1",
+    "uvicorn>=0.29,<1",
+    "python-dotenv>=1.0",
+    "pytest>=8.0",
+]
+
+# agent/ is the import root (server.py, graph.py are top-level modules).
+[tool.pytest.ini_options]
+pythonpath = ["."]
