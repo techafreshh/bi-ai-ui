@@ -32,9 +32,12 @@ React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
 - Mock B2B-SaaS data lives in `data/app.db` (gitignored), generated
   deterministically by `python agent/scripts/generate_data.py`: ~5–8k
   accounts plus 24 months (2024-10-01 → 2026-09-30) of daily
-  `subscription_events` / `revenue_events` / `usage_events` with a planted
-  Q3-2026 net-new-ARR growth ramp; the schema is documented in the script's
-  docstring and opened via `agent/db.py`.
+  `subscription_events` / `revenue_events` / `usage_events` with three
+  planted shapes — a Q3-2026 net-new-ARR growth ramp, an Aug-10-2026
+  pricing-change churn spike (~40 Growth-segment accounts adopt a new plan
+  and cancel through 2026-09-30), and a Sept 8–21 ingest bug (exact
+  duplicates plus NULL-amount usage rows, Startup segment only); the schema
+  is documented in the script's docstring and opened via `agent/db.py`.
 - Both services run from `docker-compose.yml` (web dev server :5173,
   agent :8123).
 

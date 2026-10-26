@@ -1,13 +1,28 @@
-"""Deterministic seeded SQLite data generator (issue #3).
+"""Deterministic seeded SQLite data generator (issues #3 and #4).
 
 Running `python agent/scripts/generate_data.py` creates `data/app.db`
 (gitignored) with mock B2B-SaaS data covering the 24 months ending
 2026-09-30: ~5–8k accounts plus daily subscription / revenue / usage event
 tables, all reproducible from one fixed seed — running the script twice
 yields identical per-table row counts and identical total revenue to the
-cent. An Aug-1-2026 go-to-market campaign is baked in as pinned monthly
-new-account counts, producing smooth, strong net-new ARR growth through
-Q3 2026.
+cent. Three shapes are planted deterministically:
+
+  1. Q3 growth ramp (issue #3): an Aug-1-2026 go-to-market campaign is
+     baked in as pinned monthly new-account counts, producing strong
+     net-new ARR growth through Q3 2026.
+  2. Churn spike (issue #4): following a 2026-08-10 pricing change, exactly
+     40 Growth-segment accounts adopt a new plan (one ladder rung up) and
+     carry a zero-delta 'cancel' marker between 2026-08-10 and 2026-09-30.
+     Candidates are created on or before 2026-01-31, so every churned
+     account's tenure exceeds six months by construction. Revenue and
+     usage stop (inclusive) on the cancel date; the accounts row keeps its
+     churn-time plan/ARR, so accounts.arr_cents == SUM(arr_delta_cents)
+     still holds verbatim.
+  3. Ingest bug (issue #4): usage rows for Startup-segment accounts only,
+     inside 2026-09-08..2026-09-21, are corrupted per emitted row by one
+     draw — 15% also emit an exact duplicate (same account, ts, metric,
+     amount) and 6% emit with units = NULL. NULL units exist only in these
+     planted rows; other segments see zero duplicates and zero NULLs.
 
 Schema (created verbatim by this script; dates are TEXT 'YYYY-MM-DD' so SQL
 and probes filter them naturally, money is INTEGER cents — never floats):
@@ -24,7 +39,7 @@ and probes filter them naturally, money is INTEGER cents — never floats):
         id INTEGER PRIMARY KEY,
         account_id INTEGER NOT NULL REFERENCES accounts(id),
         event_date TEXT NOT NULL,
-        event_type TEXT NOT NULL,      -- 'new' | 'upgrade' ('cancel' reserved for a later issue)
+        event_type TEXT NOT NULL,      -- 'new' | 'upgrade' | 'cancel' ('cancel' = churn marker, issue #4)
         arr_delta_cents INTEGER NOT NULL);
 
     revenue_events(
@@ -38,25 +53,31 @@ and probes filter them naturally, money is INTEGER cents — never floats):
         account_id INTEGER NOT NULL REFERENCES accounts(id),
         event_date TEXT NOT NULL,
         metric TEXT NOT NULL,          -- always 'api_calls' in this issue
-        units INTEGER NOT NULL);
+        units INTEGER);                -- NULL only in the planted ingest-bug rows (issue #4)
 
 Net-new ARR for a month := SUM(arr_delta_cents) over that month's
 subscription_events. The 2024-10 founding cohort is pinned to 2024-10-01,
 which pins the minimum event date inside the acceptance window
 2024-10-01..2024-10-31; every account bills daily pro-rata through
-2026-09-30, so that exact day is always the maximum event date.
+2026-09-30 (churned accounts stop on their cancel date), so that exact day
+is always the maximum event date.
 
 Growth shape: baseline months draw 210..270 new accounts; the campaign
 months pin 2026-07: 280, 2026-08: 560, 2026-09: 840 (2× and 3× July). With
 the weighted plan mix (E[ARR] ≈ $7,710 per new account), Jul/Aug/Sep net-new
 ARR land near $2.2M / $4.3M / $6.5M — each month ≥ the prior one and
 Aug+Sep ≥ 1.5× Jul with sampling noise roughly an order of magnitude below
-the ramp steps.
+the ramp steps. Issue #4's churn repricing upgrades add at most ≈$0.7M
+gross across Aug–Sep 2026 (40 accounts × ≤$18k, ≈2/3 landing in August),
+shifting the ≈$1.9M Sep−Aug step margin by at most ≈$0.23M — the Q3
+monotonicity contract keeps holding by wide margin.
 
 Determinism is structural, not hoped for: all randomness flows through ONE
 `random.Random(SEED)` passed to pure builders that consume draws in a fixed
-order (monthly counts → per-account plan/segment/day/name → monthly upgrade
-picks → usage draws). Do not insert new draws above existing ones. No
+order (monthly counts → per-account plan/segment/day/name → monthly
+upgrade picks → churn cohort picks and cancel/upgrade dates → usage draws,
+with ingest-bug rolls interleaved per in-window Startup row). New draws
+join only at the end of that chain, never above existing ones. No
 module-global `random`, no iteration over sets (PYTHONHASHSEED
 independence), sequential ids, integer-only money math.
 """
@@ -106,6 +127,30 @@ USAGE_UNITS_RANGE = (120, 50_000)
 WEEKEND_USAGE_PCT = 40             # weekend usage factor, integer percent
 DAILY_REVENUE_DAYS = 365           # pro-rata divisor (constant, integer math)
 
+# Churn spike (issue #4): exactly CHURNED_ACCOUNT_COUNT accounts cancel in
+# the window — 40 pins inside the acceptance band 38–45 and reproduces
+# identically on rerun; all are Growth-segment (acceptance: ≥80%) and
+# created through CHURN_CANDIDATE_CREATED_THROUGH, so the smallest possible
+# tenure (earliest cancel 2026-08-10 minus 2026-01-31) is 191 days and the
+# "median tenure > 6 months" clause holds by construction.
+CHURNED_ACCOUNT_COUNT = 40
+CHURN_WINDOW_START = date(2026, 8, 10)   # the pricing-change day
+CHURN_WINDOW_END = date(2026, 9, 30)
+CHURN_CANDIDATE_CREATED_THROUGH = "2026-01-31"
+
+# Ingest bug (issue #4): per emitted usage row whose account is Startup
+# (the only segment affected) and whose date is in the 14-day window, one
+# roll decides — 15% yield an exact duplicate copy, 6% yield units = NULL.
+# Against total window rows the planted shares are 15/115 ≈ 13% duplicated
+# and 6/115 ≈ 5.2% null (against baseline rows 15% and 6%) — ≥2.6× above
+# the acceptance floors (≥5% / >2%) under either denominator reading;
+# other segments never see a roll, so their rates are exactly 0 (<0.5%
+# caps).
+USAGE_BUG_WINDOW = ("2026-09-08", "2026-09-21")
+USAGE_BUG_SEGMENT = "Startup"
+USAGE_BUG_DUPLICATE_SHARE = 0.15
+USAGE_BUG_NULL_SHARE = 0.06
+
 NAME_PREFIXES = ("Azure", "Borealis", "Cinder", "Dune", "Ember", "Fjord", "Grove", "Halcyon")
 NAME_SUFFIXES = (
     "Nanometrics", "Dynamics", "Labs", "Systems", "Works",
@@ -145,7 +190,7 @@ CREATE TABLE usage_events (
     account_id INTEGER NOT NULL REFERENCES accounts(id),
     event_date TEXT NOT NULL,
     metric TEXT NOT NULL,
-    units INTEGER NOT NULL
+    units INTEGER
 );
 CREATE INDEX idx_subscription_events_event_date ON subscription_events(event_date);
 CREATE INDEX idx_revenue_events_event_date ON revenue_events(event_date);
@@ -270,6 +315,72 @@ def build_accounts(rng, plan):
     return accounts, subscription_events
 
 
+def apply_churn(rng, accounts, subscription_events):
+    """Plant the Aug-2026 pricing-change churn spike (issue #4).
+
+    Candidates: Growth-segment accounts created on or before
+    CHURN_CANDIDATE_CREATED_THROUGH that still have a ladder rung above
+    (`plan in UPGRADE_DELTA_CENTS`), in id order — rng.sample over the list
+    picks exactly CHURNED_ACCOUNT_COUNT (no set iteration anywhere).
+    Per pick: draw the cancel date uniformly in the churn window, then the
+    paired "new plan" upgrade uniformly in [CHURN_WINDOW_START, cancel].
+    The upgrade event moves the account one rung up; the 'cancel' event
+    carries arr_delta_cents = 0 and is purely the churn marker — the
+    account row keeps its churn-time plan/ARR, so
+    accounts.arr_cents == SUM(arr_delta_cents) keeps holding verbatim.
+
+    Returns {account_id: cancel_date}; revenue and usage emission for these
+    accounts stops (inclusive) on the cancel date.
+    """
+    candidates = [
+        account for account in sorted(accounts, key=lambda item: item["id"])
+        if account["segment"] == "Growth"
+        and account["plan"] in UPGRADE_DELTA_CENTS  # a next rung must exist
+        and account["created_at"] <= CHURN_CANDIDATE_CREATED_THROUGH
+    ]
+    picked = rng.sample(candidates, CHURNED_ACCOUNT_COUNT)
+    churn_dates = {}
+    next_event_id = len(subscription_events) + 1
+    for account in picked:
+        cancel_date = CHURN_WINDOW_START + timedelta(
+            days=rng.randint(0, (CHURN_WINDOW_END - CHURN_WINDOW_START).days)
+        )
+        upgrade_date = CHURN_WINDOW_START + timedelta(
+            days=rng.randint(0, (cancel_date - CHURN_WINDOW_START).days)
+        )
+        old_plan = account["plan"]
+        subscription_events.append((
+            next_event_id, account["id"], upgrade_date.isoformat(),
+            "upgrade", UPGRADE_DELTA_CENTS[old_plan],
+        ))
+        subscription_events.append((
+            next_event_id + 1, account["id"], cancel_date.isoformat(),
+            "cancel", 0,
+        ))
+        next_event_id += 2
+        account["plan"] = NEXT_PLAN[old_plan]
+        account["arr_cents"] += UPGRADE_DELTA_CENTS[old_plan]
+        churn_dates[account["id"]] = cancel_date
+    return churn_dates
+
+
+def _sort_and_renumber_events(subscription_events):
+    """Restore global event chronology after the churn append (issue #4).
+
+    Churn events are appended after every earlier id exists, so id order
+    briefly stops matching date order. Stable sort by (event_date, id) and
+    reassignment of ids 1..N keeps the documented subscription_events
+    contract — chronological rows, chronological ids — which is exactly
+    what `_account_timelines`' tuple sort relies on.
+    """
+    subscription_events.sort(key=lambda event: (event[2], event[0]))
+    subscription_events[:] = [
+        (index, account_id, event_date, event_type, delta)
+        for index, (_old_id, account_id, event_date, event_type, delta)
+        in enumerate(subscription_events, 1)
+    ]
+
+
 def _account_timelines(accounts, subscription_events):
     """Per account (indexed by id - 1): date-sorted [(from_date, arr_cents)].
 
@@ -293,46 +404,86 @@ def _account_timelines(accounts, subscription_events):
     return timelines
 
 
-def iter_revenue_events(accounts, timelines):
+def iter_revenue_events(accounts, timelines, churn_dates):
     """Yield (account_id, event_date, amount_cents) for every active day.
 
     One pro-rata row per account-day (|created_at, END_DATE|) priced at the
     point-in-time ARR // DAILY_REVENUE_DAYS (floor, integers only) — daily
     event tables per the issue, and every date in the window gets rows so
-    the min/max acceptance dates hold by construction.
+    the min/max acceptance dates hold by construction. Churned accounts
+    (issue #4) stop inclusive on their cancel date — the churn day is the
+    last billed day.
     """
     for account in accounts:
         points = timelines[account["id"] - 1]
+        churn_end = churn_dates.get(account["id"], END_DATE)
         for index, (from_date, arr_cents) in enumerate(points):
             rate = arr_cents // DAILY_REVENUE_DAYS
             if index + 1 < len(points):
                 segment_end = points[index + 1][0] - timedelta(days=1)
             else:
                 segment_end = END_DATE
+            if segment_end > churn_end:
+                segment_end = churn_end
             day = from_date
             while day <= segment_end:
                 yield (account["id"], day.isoformat(), rate)
                 day += timedelta(days=1)
 
 
-def iter_usage_events(rng, accounts):
+def iter_usage_events(rng, accounts, churn_dates):
     """Yield (account_id, event_date, metric, units) seeded telemetry rows.
 
     Draw order: accounts by id, days ascending — one rng.random() check and,
     on a hit, one rng.randint() per account-day. Weekend days scale units
-    down by an integer percent (WEEKEND_USAGE_PCT).
+    down by an integer percent (WEEKEND_USAGE_PCT). Churned accounts
+    (issue #4) stop inclusive on their cancel date.
     """
     low, high = USAGE_UNITS_RANGE
     for account in accounts:
         account_id = account["id"]
         day = date.fromisoformat(account["created_at"])
-        while day <= END_DATE:
+        end = churn_dates.get(account_id, END_DATE)
+        while day <= end:
             if rng.random() < USAGE_PROB:
                 units = rng.randint(low, high)
                 if day.weekday() >= 5:  # 5=Sat, 6=Sun
                     units = units * WEEKEND_USAGE_PCT // 100
                 yield (account_id, day.isoformat(), USAGE_METRIC, units)
             day += timedelta(days=1)
+
+
+def emit_usage_events(rng, accounts, churn_dates):
+    """Wrap `iter_usage_events` with the Sept-2026 ingest bug (issue #4).
+
+    Streaming pass-through: memory stays O(1), ids stay insert-ordered and
+    each baseline row flows through untouched except rows whose account is
+    Startup-segment and whose event_date is in USAGE_BUG_WINDOW — exactly
+    one rng.random() roll per such row decides: below
+    USAGE_BUG_DUPLICATE_SHARE the row is also emitted as an exact copy
+    (same account, ts, metric, amount — the duplicate group size is always
+    exactly 2, since the baseline emits at most one row per account-day);
+    below that plus USAGE_BUG_NULL_SHARE the row is emitted with
+    units = NULL. Other segments never see a roll, so their duplicate and
+    null rates are exactly 0. No collision with churn: churned accounts are
+    Growth-segment and the bug is Startup-only.
+    """
+    accounts_by_id = {account["id"]: account for account in accounts}
+    window_start, window_end = USAGE_BUG_WINDOW
+    for row in iter_usage_events(rng, accounts, churn_dates):
+        account_id, event_date, metric, units = row
+        if (event_date < window_start or event_date > window_end
+                or accounts_by_id[account_id]["segment"] != USAGE_BUG_SEGMENT):
+            yield row
+            continue
+        roll = rng.random()
+        if roll < USAGE_BUG_DUPLICATE_SHARE:
+            yield row
+            yield row  # exact duplicate: same account, ts, metric, amount
+        elif roll < USAGE_BUG_DUPLICATE_SHARE + USAGE_BUG_NULL_SHARE:
+            yield (account_id, event_date, metric, None)
+        else:
+            yield row
 
 
 def _insert_batched(conn, sql, rows, batch_size=INSERT_BATCH_ROWS):
@@ -372,6 +523,45 @@ def _print_summary(db_path):
                 f"SELECT MIN(event_date), MAX(event_date) FROM {table}"
             ).fetchone()
             print(f"  {table} dates: {min_date} .. {max_date}")
+        window = (CHURN_WINDOW_START.isoformat(), CHURN_WINDOW_END.isoformat())
+        churned = conn.execute(
+            "SELECT COUNT(*) FROM subscription_events "
+            "WHERE event_type = 'cancel' AND event_date BETWEEN ? AND ?",
+            window,
+        ).fetchone()[0]
+        by_segment = conn.execute(
+            "SELECT a.segment, COUNT(*) FROM subscription_events s "
+            "JOIN accounts a ON a.id = s.account_id "
+            "WHERE s.event_type = 'cancel' AND s.event_date BETWEEN ? AND ? "
+            "GROUP BY 1 ORDER BY 1",
+            window,
+        ).fetchall()
+        print(
+            f"  churned accounts (cancels) {window[0]}..{window[1]}: "
+            f"{churned:,} — "
+            + ", ".join(f"{segment}={count:,}" for segment, count in by_segment)
+        )
+        dup_rows = conn.execute(
+            "SELECT COALESCE(SUM(n - 1), 0) FROM ("
+            "  SELECT COUNT(*) AS n FROM usage_events u "
+            "  JOIN accounts a ON a.id = u.account_id "
+            "  WHERE u.event_date BETWEEN ? AND ? AND a.segment = ? "
+            "  GROUP BY u.account_id, u.event_date, u.units HAVING n > 1"
+            ")",
+            (USAGE_BUG_WINDOW[0], USAGE_BUG_WINDOW[1], USAGE_BUG_SEGMENT),
+        ).fetchone()[0]
+        null_rows = conn.execute(
+            "SELECT COUNT(*) FROM usage_events u "
+            "JOIN accounts a ON a.id = u.account_id "
+            "WHERE u.event_date BETWEEN ? AND ? AND a.segment = ? "
+            "AND u.units IS NULL",
+            (USAGE_BUG_WINDOW[0], USAGE_BUG_WINDOW[1], USAGE_BUG_SEGMENT),
+        ).fetchone()[0]
+        print(
+            f"  ingest bug {USAGE_BUG_WINDOW[0]}..{USAGE_BUG_WINDOW[1]} "
+            f"({USAGE_BUG_SEGMENT} only): duplicate rows {dup_rows:,}, "
+            f"null-amount rows {null_rows:,}"
+        )
     finally:
         conn.close()
 
@@ -380,7 +570,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
             "Generate the deterministic seeded mock SQLite database "
-            "(data/app.db by default) with a Q3-2026 growth shape."
+            "(data/app.db by default) with the Q3-2026 growth ramp, the "
+            "Aug-2026 churn spike and the Sept-2026 ingest-bug shapes."
         )
     )
     parser.add_argument(
@@ -393,6 +584,8 @@ def main(argv=None):
     rng = random.Random(SEED)
     plan = plan_months(rng)
     accounts, subscription_events = build_accounts(rng, plan)
+    churn_dates = apply_churn(rng, accounts, subscription_events)
+    _sort_and_renumber_events(subscription_events)
     timelines = _account_timelines(accounts, subscription_events)
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -421,13 +614,13 @@ def main(argv=None):
             conn,
             "INSERT INTO revenue_events (account_id, event_date, amount_cents) "
             "VALUES (?, ?, ?)",
-            iter_revenue_events(accounts, timelines),
+            iter_revenue_events(accounts, timelines, churn_dates),
         )
         _insert_batched(
             conn,
             "INSERT INTO usage_events (account_id, event_date, metric, units) "
             "VALUES (?, ?, ?, ?)",
-            iter_usage_events(rng, accounts),
+            emit_usage_events(rng, accounts, churn_dates),
         )
         conn.commit()
     finally:
