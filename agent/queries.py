@@ -205,6 +205,19 @@ WHERE s.event_type = 'cancel'
   AND s.event_date BETWEEN ? AND ?
 """
 
+# Latest event day across all three event tables: per-table MAX rides the
+# event_date indexes, the outer MAX folds the three candidates (the same
+# union-MAX shape quality.py uses for its default scope). Params: none.
+_SQL_LATEST_EVENT_DATE = """
+SELECT MAX(d) FROM (
+    SELECT MAX(event_date) AS d FROM subscription_events
+    UNION ALL
+    SELECT MAX(event_date) FROM revenue_events
+    UNION ALL
+    SELECT MAX(event_date) FROM usage_events
+)
+"""
+
 
 def _require_date(value, label):
     """Validate `value` as a calendar date, returning the canonical
@@ -302,6 +315,18 @@ def arr_series(start, end):
     finally:
         conn.close()
     return [{"date": row[0], "arr": row[1]} for row in rows]
+
+
+def latest_event_date():
+    """Latest observed event day across all three event tables as an ISO
+    string, or None on a DB with no events at all — the deterministic
+    "data_end" anchor read_state resolves query windows against (the data's
+    own horizon, never a wall clock). Read-only, like every query here."""
+    conn = db.connect(readonly=True)
+    try:
+        return conn.execute(_SQL_LATEST_EVENT_DATE).fetchone()[0]
+    finally:
+        conn.close()
 
 
 def churn_cohort(window, limit=50):
