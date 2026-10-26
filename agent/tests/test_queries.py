@@ -180,6 +180,78 @@ def test_churn_delta_contract(seeded_db):
     assert 0 < result["current"] < 1
 
 
+def test_churn_driver_contract(seeded_db):
+    """Issue #16: churn_driver(Aug 2026, data_end) — the user's window holds
+    the repriced-cancel signature, so spiked flips and the cohort extends to
+    data_end (2026-09-30): exactly 40 cancels, 100% repriced, Growth the
+    dominant segment at share 1.0, and the <= limit cohort rows reused from
+    churn_cohort. A March 2026 window has no repriced cancel: spiked False,
+    the cohort stays window-scoped, zero cancels and no rows — an off-spike
+    question never lists spike rows it did not ask about."""
+    driver = queries.churn_driver(("2026-08-01", "2026-08-31"), data_end="2026-09-30")
+    assert driver["spiked"] is True
+    assert driver["cohort_start"] == "2026-08-01"
+    assert driver["cohort_end"] == "2026-09-30"
+    assert driver["cancelled"] == 40
+    assert driver["repriced"] == 40
+    assert driver["dominant_segment"] == "Growth"
+    assert driver["dominant_share"] == 1.0
+    # rows == churn_cohort over the very cohort window the driver chose.
+    assert driver["rows"] == queries.churn_cohort(("2026-08-01", "2026-09-30"))
+
+    march = queries.churn_driver(("2026-03-01", "2026-03-31"), data_end="2026-09-30")
+    assert march == {
+        "cohort_start": "2026-03-01",
+        "cohort_end": "2026-03-31",
+        "spiked": False,
+        "cancelled": 0,
+        "repriced": 0,
+        "rows": [],
+        "dominant_segment": None,
+        "dominant_share": 0.0,
+    }
+
+    # No data_end: the cohort cannot extend beyond the window even on-spike.
+    windowed = queries.churn_driver(("2026-08-01", "2026-08-31"))
+    assert windowed["cohort_end"] == "2026-08-31"
+    assert 1 <= len(windowed["rows"]) <= 50 and windowed["repriced"] > 0
+
+
+def test_churn_cohort_detail_contract(seeded_db):
+    """Issue #16: churn_cohort_detail over the planted spike, filtered to
+    Growth, returns exactly the drill-down row shape — segment / plan / mrr
+    / tenure_months / cancelled_on / repriced — with every row repriced
+    'yes' (the in-window repricing signature), ascending cancel dates and
+    positive money/tenure; the unfiltered call is a superset and the limit
+    cap applies."""
+    detail = queries.churn_cohort_detail(
+        ("2026-08-01", "2026-09-30"), segment="Growth", limit=50
+    )
+    assert len(detail) == 40
+    for row in detail:
+        assert set(row) == {
+            "segment",
+            "plan",
+            "mrr",
+            "tenure_months",
+            "cancelled_on",
+            "repriced",
+        }
+        assert row["segment"] == "Growth"
+        assert row["repriced"] == "yes"
+        assert row["mrr"] > 0
+        assert row["tenure_months"] > 0
+    cancelled_on = [row["cancelled_on"] for row in detail]
+    assert cancelled_on == sorted(cancelled_on)
+
+    everything = queries.churn_cohort_detail(("2026-08-01", "2026-09-30"))
+    assert len(everything) == len(detail)  # both cohorts are Growth-only
+    assert set(row["segment"] for row in everything) == {"Growth"}
+    assert queries.churn_cohort_detail(
+        ("2026-08-01", "2026-09-30"), segment="Growth", limit=5
+    ) == detail[:5]
+
+
 def test_latest_event_date_contract(seeded_db):
     """Latest observed event day across all three event tables = the seed's
     horizon 2026-09-30 — the deterministic data_end anchor read_state
@@ -219,6 +291,19 @@ def test_sql_injection_safety(seeded_db):
     with pytest.raises(ValueError):
         queries.churn_cohort(("2026-08-10", INJECTION))
     with pytest.raises(ValueError):
+        queries.churn_driver((INJECTION, "2026-09-30"), data_end="2026-09-30")
+    with pytest.raises(ValueError):
+        queries.churn_driver(("2026-08-01", "2026-08-31"), data_end=INJECTION)
+    with pytest.raises(ValueError):
+        queries.churn_cohort_detail((INJECTION, "2026-09-30"))
+    # The segment filter travels as a bound :segment parameter (it is not a
+    # date, so it never sees _require_date): an injection payload simply
+    # matches no segment and yields zero rows — parameterized, never
+    # interpolated (the module's security model).
+    assert queries.churn_cohort_detail(
+        ("2026-08-01", "2026-09-30"), segment=INJECTION
+    ) == []
+    with pytest.raises(ValueError):
         queries.churn_delta(end=INJECTION)
     with pytest.raises(ValueError):
         queries.churn_delta(end="2026-09-30", metric=f"churn_rate{INJECTION}")
@@ -233,8 +318,8 @@ def test_sql_injection_safety(seeded_db):
 
 def test_input_validation(seeded_db):
     """Contract edges: reversed windows, non-tuple and wrong-length churn
-    windows, an unknown churn metric and baseline_months = 0 are all
-    ValueError before any SQL runs; the cohort limit must be >= 1."""
+    windows, an unknown churn metric, baseline_months = 0, cohort limits < 1
+    and a malformed segment filter are all ValueError before any SQL runs."""
     with pytest.raises(ValueError):
         queries.kpis("2026-09-30", "2026-07-01")
     with pytest.raises(ValueError):
@@ -249,6 +334,14 @@ def test_input_validation(seeded_db):
         queries.churn_delta(end="2026-09-30", baseline_months=0)
     with pytest.raises(ValueError):
         queries.churn_cohort(("2026-08-10", "2026-09-30"), limit=0)
+    with pytest.raises(ValueError):
+        queries.churn_driver(("2026-08-10", "2026-09-30"), data_end="garbage")
+    with pytest.raises(ValueError):
+        queries.churn_driver(("2026-08-10", "2026-09-30"), limit=0)
+    with pytest.raises(ValueError):
+        queries.churn_cohort_detail(("2026-08-10", "2026-09-30"), segment="")
+    with pytest.raises(ValueError):
+        queries.churn_cohort_detail(("2026-08-10", "2026-09-30"), limit=-1)
 
 
 def test_module_imports_both_styles():
