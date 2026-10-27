@@ -12,8 +12,10 @@ import {
   YAxis,
 } from "recharts";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../ui/card";
+import { Skeleton } from "../ui/skeleton";
 import type { CatalogSize } from "./catalogSize";
 import { useCatalogSize } from "./catalogSize";
+import { useSlotCopy } from "./slotCopy";
 import { formatCurrency } from "../../lib/format";
 import { buildSeries } from "../../lib/series";
 
@@ -36,11 +38,20 @@ const HUMAN_SERIES: Record<string, string> = {
 
 export function LineChartCard({ series, range, annotations }: LineChartCardProps) {
   const size = useCatalogSize();
+  // Issue #13: CardTitle is the line_chart.title slot — streamed copy wins,
+  // a pending slot with no copy yet renders the skeleton, and the legacy
+  // series title stays the default-context fallback (fixture mode).
+  const { slotCopy, slotsPending } = useSlotCopy();
+  const copy = slotCopy["line_chart.title"];
   const points = buildSeries(series, range);
   return (
     <Card data-testid="catalog-line_chart" className="h-full">
       <CardHeader>
-        <CardTitle>{HUMAN_SERIES[series] ?? series}</CardTitle>
+        {slotsPending && !copy ? (
+          <Skeleton data-testid="slot-skeleton" className="h-5 w-44" />
+        ) : (
+          <CardTitle>{copy ?? HUMAN_SERIES[series] ?? series}</CardTitle>
+        )}
         <CardDescription>{range.replace("..", " → ")}</CardDescription>
       </CardHeader>
       <CardContent>

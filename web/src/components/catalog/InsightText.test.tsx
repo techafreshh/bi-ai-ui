@@ -5,6 +5,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { InsightText } from "./InsightText";
+import { SlotCopyProvider } from "./slotCopy";
 
 afterEach(() => {
   cleanup();
@@ -23,5 +24,30 @@ describe("InsightText", () => {
     expect(
       screen.getByText(/Net-new ARR accelerated through Q3/),
     ).toBeTruthy();
+  });
+
+  it("renders the slot skeleton while copy is pending", () => {
+    render(
+      <SlotCopyProvider value={{ slotCopy: {}, slotsPending: true }}>
+        <InsightText title="Q3 summary" body="Prop body." />
+      </SlotCopyProvider>,
+    );
+    expect(screen.getByTestId("slot-skeleton")).toBeTruthy();
+    expect(screen.queryByText("Prop body.")).toBeNull();
+  });
+
+  it("renders streamed copy over the prop body once filled", () => {
+    render(
+      <SlotCopyProvider
+        value={{
+          slotCopy: { "insight_text.body": "Streamed narrative." },
+          slotsPending: false,
+        }}
+      >
+        <InsightText title="Q3 summary" body="Prop body." />
+      </SlotCopyProvider>,
+    );
+    expect(screen.getByText("Streamed narrative.")).toBeTruthy();
+    expect(screen.queryByTestId("slot-skeleton")).toBeNull();
   });
 });
