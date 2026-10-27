@@ -15,6 +15,8 @@ import json
 import uuid
 from pathlib import Path
 
+import pytest
+
 from ag_ui.core.types import RunAgentInput, UserMessage
 from ag_ui.encoder import EventEncoder
 from copilotkit import LangGraphAGUIAgent
