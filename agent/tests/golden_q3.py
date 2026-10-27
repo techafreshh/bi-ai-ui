@@ -26,10 +26,7 @@ could only change the narrative copy, never the window.
 
 import asyncio
 import json
-import subprocess
-import sys
 import uuid
-from pathlib import Path
 
 import pytest
 from ag_ui.core.types import RunAgentInput, UserMessage
@@ -40,10 +37,6 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 import db
 import graph as agent_graph
 from decision.client import DecisionClient
-
-AGENT_DIR = Path(__file__).resolve().parents[1]
-GENERATOR = AGENT_DIR / "scripts" / "generate_data.py"
-RUN_TIMEOUT_SECONDS = 600
 
 Q3_RANGE = "2026-07-01..2026-09-30"
 
@@ -60,31 +53,14 @@ FILL_REPLY = json.dumps(
 )
 
 
-@pytest.fixture(scope="session")
-def seeded_db_path(tmp_path_factory):
-    """Seed ONE temp DB for the session through the generator's real
-    entrypoint and return its path. Same idiom as test_graph.py /
-    test_queries.py — but the db.DEFAULT_DB_PATH swap is kept out of this
-    fixture: golden_q3.py sorts before every test_*.py, so a session-long
-    swap would leak into later modules (test_generate_data's contract test
-    asserts the pristine default). The _seeded_db fixture below swaps per
-    test and restores after, keeping the pollution contained here."""
-    db_path = tmp_path_factory.mktemp("golden_q3") / "seeded.db"
-    result = subprocess.run(
-        [sys.executable, str(GENERATOR), "--db-path", str(db_path)],
-        cwd=AGENT_DIR,
-        capture_output=True,
-        text=True,
-        timeout=RUN_TIMEOUT_SECONDS,
-    )
-    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-    return db_path
-
-
 @pytest.fixture(autouse=True)
 def _seeded_db(request, seeded_db_path):
-    """Point db.DEFAULT_DB_PATH at the session seed for one test, then
-    restore — the graph's query layer reads the path at call time."""
+    """Point db.DEFAULT_DB_PATH at the session seed (tests/conftest.py, one
+    generator subprocess per pytest session) for one test, then restore —
+    the graph's query layer reads the path at call time, and the per-test
+    restore keeps the swap from leaking into later modules (golden_q3.py
+    sorts before every test_*.py; test_generate_data's contract test asserts
+    the pristine default)."""
     del request  # autouse-only: every test in this module needs the seed
     original = db.DEFAULT_DB_PATH
     db.DEFAULT_DB_PATH = seeded_db_path

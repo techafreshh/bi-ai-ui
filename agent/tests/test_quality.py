@@ -2,9 +2,11 @@
 
 One test per acceptance clause of issue #6 (plus the threshold bands, scope
 validation and default-scope semantics the plan pins), each with a docstring
-naming the clause it proves. The seeded DB is driven through the generator's
-real entrypoint as a subprocess (mirroring the runtime gate) with the same
-session-fixture idiom as test_queries.py; quality.py opens only
+naming the clause it proves. The seeded DB is the suite-wide shared seed
+driven through the generator's real entrypoint as a subprocess (mirroring
+the runtime gate), provided by tests/conftest.py — one generator run per
+pytest session, with a module-scoped DEFAULT_DB_PATH swap-restore per
+consumer; quality.py opens only
 db.connect(readonly=True) against db.DEFAULT_DB_PATH, so that module default
 remains the single supported seam. The synthetic fixture builder
 (quality_fixture.py) exists only to prove the checks discriminate: it
@@ -13,20 +15,13 @@ arithmetic, not a statistical expectation.
 """
 
 import json
-import subprocess
-import sys
 from datetime import date, timedelta
-from pathlib import Path
 
 import pytest
 
 import db
 import quality
 from quality_fixture import build_fixture
-
-AGENT_DIR = Path(__file__).resolve().parents[1]
-GENERATOR = AGENT_DIR / "scripts" / "generate_data.py"
-RUN_TIMEOUT_SECONDS = 600
 
 INJECTION = "2026-07-01'; DROP TABLE accounts;--"
 
@@ -40,33 +35,6 @@ USAGE_METRIC = "api_calls"  # the schema's only metric value
 
 def _by_name(checks):
     return {check["name"]: check for check in checks}
-
-
-def _run_generator(db_path: Path) -> None:
-    """Run the generator like the runtime gate does, failing on nonzero exit."""
-    result = subprocess.run(
-        [sys.executable, str(GENERATOR), "--db-path", str(db_path)],
-        cwd=AGENT_DIR,
-        capture_output=True,
-        text=True,
-        timeout=RUN_TIMEOUT_SECONDS,
-    )
-    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-
-
-@pytest.fixture(scope="session")
-def seeded_db(tmp_path_factory):
-    """One seeded temp DB for the session; while it is in place, the check
-    module's module default points at it so every run_checks call reads the
-    seeded data (the default is restored afterwards)."""
-    db_path = tmp_path_factory.mktemp("quality") / "seeded.db"
-    _run_generator(db_path)
-    original = db.DEFAULT_DB_PATH
-    db.DEFAULT_DB_PATH = db_path
-    try:
-        yield db_path
-    finally:
-        db.DEFAULT_DB_PATH = original
 
 
 def _clean_rows(account_ids, days):

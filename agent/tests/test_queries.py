@@ -2,9 +2,10 @@
 
 One test per acceptance clause of issue #5 (plus the validation and
 import-behavior behavior the issue and plan pin), each with a docstring
-naming the clause it proves. The generator drives a fresh temp DB through
-its real entrypoint as a subprocess (mirroring the runtime gate) per the
-session-fixture idiom of test_generate_data.py; queries.py opens only
+naming the clause it proves. The generator drives the suite's shared seed
+through its real entrypoint as a subprocess (mirroring the runtime gate) —
+one run per pytest session, provided by tests/conftest.py with a
+module-scoped DEFAULT_DB_PATH swap-restore per consumer; queries.py opens only
 db.connect(readonly=True) against db.DEFAULT_DB_PATH, so the single
 supported seam the suite needs is that module default.
 """
@@ -20,37 +21,8 @@ import db
 import queries
 
 AGENT_DIR = Path(__file__).resolve().parents[1]
-GENERATOR = AGENT_DIR / "scripts" / "generate_data.py"
-RUN_TIMEOUT_SECONDS = 600
 
 INJECTION = "2026-07-01'; DROP TABLE accounts;--"
-
-
-def _run_generator(db_path: Path) -> None:
-    """Run the generator like the runtime gate does, failing on nonzero exit."""
-    result = subprocess.run(
-        [sys.executable, str(GENERATOR), "--db-path", str(db_path)],
-        cwd=AGENT_DIR,
-        capture_output=True,
-        text=True,
-        timeout=RUN_TIMEOUT_SECONDS,
-    )
-    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-
-
-@pytest.fixture(scope="session")
-def seeded_db(tmp_path_factory):
-    """One seeded temp DB for the session; while it is in place, the query
-    layer's module default points at it so every public function reads the
-    seeded data (the default is restored afterwards)."""
-    db_path = tmp_path_factory.mktemp("queries") / "seeded.db"
-    _run_generator(db_path)
-    original = db.DEFAULT_DB_PATH
-    db.DEFAULT_DB_PATH = db_path
-    try:
-        yield db_path
-    finally:
-        db.DEFAULT_DB_PATH = original
 
 
 def _is_number(value) -> bool:

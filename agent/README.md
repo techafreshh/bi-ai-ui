@@ -74,3 +74,25 @@ snapshot pin test consume:
     python agent/scripts/contract_spike.py                  # decisions only
     python agent/scripts/contract_spike.py --transport both # probe the chat
                                                             # fallback too
+
+## Tests (issue #20)
+
+The whole suite runs from the repo root with no API key and no network —
+transports are mocked (`httpx.MockTransport`), the seeded DB comes from
+one generator subprocess shared through `tests/conftest.py`, and the only
+servers touched bind loopback:
+
+    pytest agent/tests -q            # or: uv run --project agent pytest agent/tests -q
+
+Exit code 0, roughly a minute. Layout validator (`test_catalog.py`),
+DecisionClient parsing (`test_decision_client.py`), transports and timeout
+fallback (`test_decision_transports.py`), DQ checks (buggy vs clean
+fixtures, `test_quality.py`), and the graph/SSE pipelines all run; the live
+probe in `test_live_decision.py` reports as skipped. Select a suite with
+`-k` (`pytest agent/tests -k quality -q`).
+
+The live decision probe is opt-in — the same two spike questions against
+the real OpenRouter chain (needs network and a key; without a key it fails
+loud instead of skipping silently):
+
+    LIVE=1 OPENROUTER_API_KEY=... pytest agent/tests -q -k live_decision

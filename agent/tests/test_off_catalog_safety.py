@@ -13,7 +13,6 @@ test posts to the real `/copilotkit` app (server.py) 100 times.
 import json
 import uuid
 
-import pytest
 from fastapi.testclient import TestClient
 
 import catalog
@@ -26,8 +25,9 @@ from tests.test_graph import (
     _final_state,
     _heuristic_client,
     _run_sse,
-    seeded_db,
 )
+# The seeded DB itself is the suite-wide shared seed: tests/conftest.py
+# provides the `seeded_db` fixture these tests consume by name.
 
 
 # --- Acceptance clause 1 (+3): the dragon renders only the insight fallback ---
