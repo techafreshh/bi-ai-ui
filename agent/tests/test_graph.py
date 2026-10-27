@@ -308,7 +308,7 @@ def test_all_subthreshold_picks_fall_back_to_default_insight(seeded_db, monkeypa
     assert [item["type"] for item in final_a2ui["items"]] == ["insight_text"]
     # The layout shape equals the catalog fallback exactly — fill's copy in
     # slotCopy is the only allowed delta.
-    fallback = catalog._fallback_layout().model_dump()
+    fallback = catalog.fallback_layout().model_dump()
     assert final_a2ui["items"] == fallback["items"]
     assert final_a2ui["v"] == fallback["v"]
     assert final_a2ui["layout"] == fallback["layout"]
@@ -527,7 +527,7 @@ def test_dq_slot_copy_all_passing_and_unread_variants():
         {"items": [{"type": "data_quality_card", "props": {}}]}
     ) == "Data-quality checks could not be read for this window."
 
-    no_card = catalog._fallback_layout().model_dump()
+    no_card = catalog.fallback_layout().model_dump()
     assert agent_graph._dq_slot_copy(no_card) is None
 
 
@@ -640,3 +640,117 @@ def test_status_advances_through_the_five_nodes(seeded_db, monkeypatch):
         "querying",
         "done",
     ]
+
+
+# --- Issue #19: env-configurable models and threshold -------------------------
+
+
+def _stub_batch_client_factory():
+    """A decider factory over a BATCH transport answering every question
+    with a flat 0.1 raw payload. Batch (not the heuristic's per-question
+    seam) so no transport-declared model steps in front of the env-derived
+    label, and 0.1 so the layout cut empties deterministically — decisions
+    still stream, one per question."""
+    question_set = agent_graph.questions.build_question_set("Show me sales in Q3", {})
+    answers = {
+        question.id: {
+            "id": question.id,
+            "type": question.type,
+            "probabilities": (
+                {option: 0.1 for option in question.options}
+                if question.type == "choice"
+                else 0.1
+            ),
+        }
+        for question in question_set
+    }
+
+    class StubBatchTransport:
+        async def ask_batch(self, questions):
+            return answers
+
+    return lambda: DecisionClient(StubBatchTransport())
+
+
+def test_per_type_model_overrides_stream_per_answer(seeded_db, monkeypatch):
+    """Issue #19: with DECISION_MODEL_CHOICE/_NOUL/_SCORE set, each streamed
+    decisions[].model names the override its answer's type routed to —
+    verbatim on the wire, the exact string the drawer renders."""
+    monkeypatch.setenv("DECISION_MODEL_CHOICE", "override/choice-model")
+    monkeypatch.setenv("DECISION_MODEL_NOUL", "override/noul-model")
+    monkeypatch.setenv("DECISION_MODEL_SCORE", "override/score-model")
+    monkeypatch.setenv("DECISION_MODEL", "stub/plain-model")  # ignored per-type
+
+    _, snapshots = _run_sse(monkeypatch, decision_client=_stub_batch_client_factory())
+    decisions = _final_state(snapshots)["decisions"]
+
+    expected = {
+        "choice": "override/choice-model",
+        "noul": "override/noul-model",
+        "score": "override/score-model",
+    }
+    assert 1 <= len(decisions) <= 7
+    assert {d["type"] for d in decisions} == set(expected)
+    for decision in decisions:
+        assert decision["model"] == expected[decision["type"]], decision
+
+
+def test_decision_model_env_streams_without_overrides(seeded_db, monkeypatch):
+    """Issue #19: with no per-type overrides, every decisions[].model is the
+    DECISION_MODEL env value verbatim — the env swap is observable in the
+    drawer without any code edit."""
+    for var in ("DECISION_MODEL_CHOICE", "DECISION_MODEL_NOUL", "DECISION_MODEL_SCORE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DECISION_MODEL", "stub/sentinel-model")
+
+    _, snapshots = _run_sse(monkeypatch, decision_client=_stub_batch_client_factory())
+    decisions = _final_state(snapshots)["decisions"]
+
+    assert decisions
+    assert all(d["model"] == "stub/sentinel-model" for d in decisions), decisions
+
+
+def test_heuristic_fallback_attributes_heuristic_despite_overrides(
+    seeded_db, monkeypatch
+):
+    """Issue #19 (attribution stays truthful): a transport failure falls back
+    to the heuristic, whose declared "heuristic" label wins over any set
+    override — decisions never store a guessed model string as fact."""
+    monkeypatch.setenv("DECISION_MODEL_CHOICE", "override/choice-model")
+    monkeypatch.setenv("DECISION_MODEL_NOUL", "override/noul-model")
+    monkeypatch.setenv("DECISION_MODEL_SCORE", "override/score-model")
+
+    def broken_factory():
+        class RaisingBatchTransport:
+            async def ask_batch(self, questions):
+                raise RuntimeError("transport down")
+
+        return DecisionClient(RaisingBatchTransport())
+
+    _, snapshots = _run_sse(monkeypatch, decision_client=broken_factory)
+    decisions = _final_state(snapshots)["decisions"]
+
+    assert 1 <= len(decisions) <= 7
+    assert all(d["model"] == "heuristic" for d in decisions), decisions
+
+
+def test_threshold_env_routes_the_layout_cut(seeded_db, monkeypatch):
+    """Issue #19 acceptance: DECISION_THRESHOLD is honored end-to-end from
+    .env alone. At 0.95 the heuristic's sales route (kpi_row 0.9,
+    line_chart 0.85) falls below the line, so the streamed final a2ui is
+    exactly the single-insight_text fallback; at 0.6 kpi_row + line_chart
+    survive. No code edit between the two runs."""
+    monkeypatch.setenv("DECISION_THRESHOLD", "0.95")
+    _, high_snapshots = _run_sse(monkeypatch)
+    high_items = _final_state(high_snapshots)["a2ui"]["items"]
+    assert [item["type"] for item in high_items] == ["insight_text"], high_items
+
+    monkeypatch.setenv("DECISION_THRESHOLD", "0.6")
+    _, normal_snapshots = _run_sse(monkeypatch)
+    normal_items = _final_state(normal_snapshots)["a2ui"]["items"]
+    assert [item["type"] for item in normal_items] == ["kpi_row", "line_chart"]
+
+    # The high-threshold run flagged every answer below the line, the
+    # low-threshold run flagged the two endorsed picks above it.
+    high_flags = _final_state(high_snapshots)["decisions"]
+    assert high_flags and all(not d["above_threshold"] for d in high_flags)

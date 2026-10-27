@@ -1,35 +1,22 @@
-import { CopilotKitProvider, CopilotSidebar } from "@copilotkit/react-core/v2";
+import { CopilotKitProvider } from "@copilotkit/react-core/v2";
 import { HttpAgent } from "@ag-ui/client";
 import "@copilotkit/react-core/v2/styles.css";
 import { DashboardCanvas } from "./components/DashboardCanvas";
 import { DecisionDrawer } from "./components/DecisionDrawer";
 import { ThemeToggle } from "./components/ui/theme-toggle";
-import { useA2UI } from "./hooks/useA2UI";
+import { ChatSidebar } from "./components/ui/chat/ChatSidebar";
 import { useDecisions } from "./hooks/useDecisions";
 import { InvestigateProvider } from "./hooks/useInvestigate";
-import { DEMO_LAYOUT } from "./lib/demoLayout";
 import { ThemeProvider } from "./lib/theme";
-
-// PRD v1.1: the provider talks to the agent's FastAPI endpoint directly —
-// browser → AG-UI SSE on :8123, no Node runtime in between. This requires the
-// agent's CORS config to allow http://localhost:5173.
-const AGENT_URL = "http://localhost:8123/copilotkit";
-
-// Must match the LangGraphAGUIAgent name in agent/server.py.
-const AGENT_ID = "bi_agent";
+import { AGENT_ID, AGENT_URL } from "./lib/agent";
 
 const biAgent = new HttpAgent({ agentId: AGENT_ID, url: AGENT_URL });
 
 // Issue #14: useAgent (like any context hook) only resolves below the
 // provider, so the provider renders this shell instead of inlining it — the
 // decision log accumulates here and the drawer mounts at the header's right.
-// Issue #17: the canvas renders the agent's streamed a2ui (latest run wins);
-// before the first run completes — or when a payload fails validation — the
-// demo fixture shows instead (the fixture is never fed agent state, so a
-// broken run degrades to the known-good demo, never a blank canvas).
 function AppShell() {
   const decisions = useDecisions(AGENT_ID);
-  const streamedLayout = useA2UI(AGENT_ID);
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
@@ -37,8 +24,8 @@ function AppShell() {
         <div>
           <h1 className="text-lg font-semibold">bi-ai-ui</h1>
           <p className="text-sm text-muted-foreground">
-            The agent composes this canvas live from its streamed a2ui layout
-            — ask in the sidebar; the demo fixture shows before the first run
+            Demo canvas — six catalog components on beUI cards, fixture-driven
+            until the agent streams a layout
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -51,14 +38,10 @@ function AppShell() {
           sidebar chats on, so the drill-down lands on the visible thread. */}
       <InvestigateProvider agentId={AGENT_ID}>
         <main className="flex-1 p-8">
-          <DashboardCanvas layout={streamedLayout ?? DEMO_LAYOUT} />
+          <DashboardCanvas />
         </main>
       </InvestigateProvider>
-      <CopilotSidebar
-        agentId={AGENT_ID}
-        defaultOpen
-        labels={{ chatInputPlaceholder: "Type a message…" }}
-      />
+      <ChatSidebar />
     </div>
   );
 }

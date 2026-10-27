@@ -13,10 +13,14 @@ state to CopilotKit (issue #10).
   * decide — questions.build_question_set's fixed catalog question set,
     fanned out through DecisionClient.decide (the #8 seam) over the wired
     transport (#9's OpenRouter chain when a key is configured, the
-    deterministic HeuristicTransport otherwise). Transport failures or
-    unparsable answers fall back to a fresh heuristic client, so
-    `decisions` always carries 1..7 entries stamped with
-    {id, type, probabilities, pick, model, latency_ms}.
+    deterministic HeuristicTransport otherwise, issue #18's guard when the
+    query names no data domain; DECISION_MODEL_CHOICE/NOUL/SCORE, issue
+    #19, route a question type to its own decision model). Transport
+    failures or unparsable answers fall back to a fresh heuristic client,
+    so `decisions` always carries 1..7 entries stamped with {id, type,
+    probabilities, pick, model, latency_ms} — model attributed per answer
+    from the transport's declaration, then the type's override, then
+    DECISION_MODEL, never a guessed value.
   * layout — assembles a complete, valid draft of above-threshold catalog
     components from the snapshot and cuts it with
     catalog.filter_layout(items, probs, threshold); nothing surviving falls
@@ -62,14 +66,14 @@ from typing_extensions import Annotated, NotRequired, TypedDict
 try:  # package-style entry (import agent.graph from the repo root)
     from agent import catalog, quality, questions, queries
     from agent.decision import client as decision_client
-    from agent.decision.heuristic import HeuristicTransport
+    from agent.decision.heuristic import HeuristicTransport, classify
 except ModuleNotFoundError:  # script-style entry (tests, server.py from agent/)
     import catalog
     import quality
     import questions
     import queries
     from decision import client as decision_client
-    from decision.heuristic import HeuristicTransport
+    from decision.heuristic import HeuristicTransport, classify
 
 logger = logging.getLogger("bi-ai-ui.agent.graph")
 
@@ -217,14 +221,18 @@ class _TimedTransport:
         return merged
 
 
-def _model_label(transport) -> str:
-    """Which model answered: a transport-declared label first (the heuristic
-    declares "heuristic", the #9 transports declare their model), then the
-    DECISION_MODEL env (the fallback chain's own default), so decisions
+def _decision_model_label(transport, answer_type) -> str:
+    """Which model answered one answer: a transport-declared label first (the
+    heuristic declares "heuristic", the #9 transports declare their model),
+    then the answer type's DECISION_MODEL_<TYPE> override (issue #19), then
+    the DECISION_MODEL env (the fallback chain's own default) — so decisions
     never store a guessed value as fact."""
     declared = getattr(transport, "model", None)
     if isinstance(declared, str) and declared:
         return declared
+    override = decision_client.per_type_model(answer_type)
+    if override:
+        return override
     return os.getenv("DECISION_MODEL", decision_client.DEFAULT_DECISION_MODEL)
 
 
@@ -369,7 +377,13 @@ async def decide(state: AgentState) -> dict:
     """Fan the catalog question set out through DecisionClient.decide and
     stamp one streamed decisions[] entry per answer.
 
-    The call always routes through the #8 seam. Any transport failure — or
+    Off-catalog queries (issue #18: heuristic.classify finds no data domain
+    in the message) never consult the wired transport — a fresh guard
+    HeuristicTransport answers instead, scoring every catalog option 0.0 so
+    the layout cut deterministically empties into the single-insight_text
+    fallback no matter what a live model claims.
+
+    Everything else routes through the #8 seam. Any transport failure — or
     a run that parses to zero answers — falls back to a fresh heuristic
     client (which cannot fail), keeping `decisions` a non-empty list of at
     most 7 entries."""
@@ -378,26 +392,43 @@ async def decide(state: AgentState) -> dict:
     question_set = questions.build_question_set(user_text, snapshot)
 
     base = get_decision_client()
-    try:
-        answers, timed = await _decide_with(
-            base.transport, base.threshold, question_set
-        )
-        if not answers:
-            # A transport that answered nothing is as broken as one that
-            # raised: fall through to the heuristic run below.
-            raise ValueError("decision transport returned no parsable answers")
-    except Exception as exc:  # noqa: BLE001 - decision failures degrade
-        logger.warning(
-            "decide: live decision transport failed (%s); falling back to the "
-            "heuristic transport",
-            exc,
+    if classify(user_text) == "off_catalog":
+        # Issue #18 safety gate: a live decider misjudging "draw me a
+        # dragon" and endorsing kpi_row 0.9 would otherwise render chart
+        # tiles for a drawing request. The keyword classifier below is the
+        # same table HeuristicTransport itself routes on, so the guard's
+        # per-question classification provably lands on the same
+        # off-catalog route (every option 0.0) — the cut then keeps nothing
+        # and the fallback view renders. Transport I/O is never attempted,
+        # so a broken endpoint costs nothing and cannot leak decisions.
+        logger.info(
+            "decide: %r classified off-catalog; answering with the "
+            "deterministic guard transport",
+            user_text,
         )
         answers, timed = await _decide_with(
             HeuristicTransport(), base.threshold, question_set
         )
+    else:
+        try:
+            answers, timed = await _decide_with(
+                base.transport, base.threshold, question_set
+            )
+            if not answers:
+                # A transport that answered nothing is as broken as one that
+                # raised: fall through to the heuristic run below.
+                raise ValueError("decision transport returned no parsable answers")
+        except Exception as exc:  # noqa: BLE001 - decision failures degrade
+            logger.warning(
+                "decide: live decision transport failed (%s); falling back to the "
+                "heuristic transport",
+                exc,
+            )
+            answers, timed = await _decide_with(
+                HeuristicTransport(), base.threshold, question_set
+            )
 
     elapsed_ms = timed.timing_by_id()
-    model = _model_label(timed)
     decisions = []
     for answer in answers:
         decisions.append(
@@ -406,7 +437,7 @@ async def decide(state: AgentState) -> dict:
                 "type": answer.type,
                 "probabilities": answer.probabilities,
                 "pick": _pick(answer),
-                "model": model,
+                "model": _decision_model_label(timed, answer.type),
                 "latency_ms": round(elapsed_ms.get(answer.id, 0.0), 2),
                 "above_threshold": answer.above_threshold,
             }
@@ -714,13 +745,13 @@ async def layout(state: AgentState) -> dict:
             layout_model = _build_investigate_layout(snapshot)
         except Exception as exc:  # noqa: BLE001 - invalid drafts never break the run
             logger.warning("investigate layout fell back to the default view (%s)", exc)
-            layout_model = catalog._fallback_layout().model_dump()
+            layout_model = catalog.fallback_layout().model_dump()
         return {"a2ui": layout_model, "status": STATUSES["layout"]}
     try:
         layout_model = _build_layout(state)
     except Exception as exc:  # noqa: BLE001 - invalid picks never break the run
         logger.warning("layout node fell back to the default view (%s)", exc)
-        layout_model = catalog._fallback_layout().model_dump()
+        layout_model = catalog.fallback_layout().model_dump()
     return {"a2ui": layout_model, "status": STATUSES["layout"]}
 
 
@@ -1073,7 +1104,7 @@ async def fill(state: AgentState) -> dict:
     snapshot = state.get("snapshot") or {}
     layout_model = state.get("a2ui")
     if not isinstance(layout_model, dict):
-        layout_model = catalog._fallback_layout().model_dump()
+        layout_model = catalog.fallback_layout().model_dump()
 
     text = None
     try:

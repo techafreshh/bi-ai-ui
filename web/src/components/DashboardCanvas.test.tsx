@@ -2,13 +2,25 @@
 // containing all six types, and the DOM contains exactly 6 registry-resolved
 // components — no fallback cards, no placeholders, no console errors.
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardCanvas } from "./DashboardCanvas";
+import {
+  FakeAgent,
+  getFakeAgent,
+  setFakeAgent,
+} from "../test/fakeAgent";
+
+// Whole-module replace: the canvas only consumes useAgent (via useA2UI),
+// so the stub keeps the CopilotKit runtime out of the suite.
+vi.mock("@copilotkit/react-core/v2", () => ({
+  useAgent: () => ({ agent: getFakeAgent(), isReady: true }),
+}));
 
 beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
+  setFakeAgent(new FakeAgent());
 });
 
 afterEach(() => {
@@ -106,5 +118,88 @@ describe("DashboardCanvas (acceptance 1)", () => {
     expect(screen.getByTestId("dq-report").textContent).toContain(
       "Report an issue",
     );
+  });
+});
+
+describe("DashboardCanvas stream phases (acceptance 13)", () => {
+  const STREAMED = {
+    v: 1 as const,
+    layout: "grid" as const,
+    items: [
+      {
+        type: "kpi_row",
+        props: {
+          kpis: [
+            { label: "Net-new ARR (2026-07-01..2026-09-30)", value: 1200000, delta: 0.18 },
+          ],
+        },
+      },
+      {
+        type: "insight_text",
+        props: { title: "Q3 summary", body: "Draft body." },
+      },
+    ],
+  };
+
+  it("shows the skeleton grid within the same tick as the run starts", () => {
+    const { container } = render(<DashboardCanvas />);
+    expect(container.querySelector('[data-testid="canvas-skeleton"]')).toBeNull();
+    act(() => {
+      getFakeAgent().emitRunStarted();
+    });
+    const skeleton = container.querySelector('[data-testid="canvas-skeleton"]');
+    expect(skeleton).not.toBeNull();
+    expect(screen.getByTestId("dashboard-canvas")).toBeTruthy();
+  });
+
+  it("renders live items with slot skeletons, then copy replaces them", () => {
+    const { container } = render(<DashboardCanvas />);
+    act(() => {
+      getFakeAgent().emitRunStarted();
+      getFakeAgent().emitState({ a2ui: STREAMED });
+    });
+    // Layout before the text model: live tiles plus pending slots.
+    expect(screen.getByTestId("catalog-kpi_row")).toBeTruthy();
+    expect(screen.getByText(/Net-new ARR/)).toBeTruthy();
+    expect(
+      container.querySelectorAll('[data-testid="slot-skeleton"]').length,
+    ).toBeGreaterThan(0);
+    // Fill: the same snapshot with slotCopy swaps skeletons for copy.
+    act(() => {
+      getFakeAgent().emitState({
+        a2ui: {
+          ...STREAMED,
+          slotCopy: {
+            "line_chart.title": "Daily ARR through Q3",
+            "insight_text.body": "Net-new ARR compounded through Q3.",
+          },
+        },
+      });
+    });
+    expect(container.querySelector('[data-testid="slot-skeleton"]')).toBeNull();
+    expect(screen.getByText("Net-new ARR compounded through Q3.")).toBeTruthy();
+  });
+
+  it("degrades an invalid streamed envelope to the fallback card, not a stuck skeleton", () => {
+    const { container } = render(<DashboardCanvas />);
+    act(() => {
+      getFakeAgent().emitRunStarted();
+      getFakeAgent().emitState({ a2ui: { v: 2 } });
+    });
+    expect(container.querySelector('[data-testid="canvas-skeleton"]')).toBeNull();
+    expect(container.querySelector('[data-testid="a2ui-fallback"]')).not.toBeNull();
+  });
+
+  it("a run ending with no layout returns to the fixture canvas", () => {
+    const { container } = render(<DashboardCanvas />);
+    act(() => {
+      getFakeAgent().emitRunStarted();
+    });
+    expect(container.querySelector('[data-testid="canvas-skeleton"]')).not.toBeNull();
+    act(() => {
+      getFakeAgent().emitRunFinalized();
+    });
+    expect(container.querySelector('[data-testid="canvas-skeleton"]')).toBeNull();
+    expect(container.querySelectorAll('[data-testid^="catalog-"]')).toHaveLength(6);
   });
 });

@@ -3,6 +3,11 @@ services:
     build: ./agent
     ports:
       - "8123:8123"
+    # env_file is the whole env passthrough (issue #19): every variable in
+    # agent/.env reaches the container as-is — models, threshold, bind
+    # address — and an edit applies via `docker compose up -d agent`
+    # (container recreate, no image rebuild). Deliberately no `environment:`
+    # block: it outranks env_file and would pin defaults over edited values.
     # Long syntax with required: false so the agent still boots (and keeps
     # /health on 200) without agent/.env — only chat needs the key.
     env_file:

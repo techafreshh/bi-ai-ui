@@ -56,6 +56,14 @@ resilience: a mock must fail ugly in tests. Transport-level resilience is
 exactly what the fallback chain (FallbackChainTransport) provides across
 transports, with bounded attempts (no infinite retries).
 
+Question-type routing (issue #19, PRD §7): DECISION_MODEL_CHOICE /
+DECISION_MODEL_NOUL / DECISION_MODEL_SCORE replace the primary /decisions
+model for their one question type; build_decision_client wires each set
+override its own chain and wraps those, with the plain chain as default,
+in TypeRoutedTransport — the router only partitions one ask_batch by type,
+fans the partitions out concurrently and merges the payload mappings;
+resilience stays FallbackChainTransport's job.
+
 Imports stdlib + httpx — no db/graph/server/model dependency.
 """
 
@@ -93,11 +101,45 @@ DEFAULT_DECISION_TIMEOUT_S = 8.0
 # request — so worst case is 2 decisions + 2 models x 2 chain attempts = 6
 # requests, then TransportError. Never an infinite retry loop.
 MAX_ATTEMPTS_PER_TRANSPORT = 2
+# Issue #19 per-type decision-model overrides (PRD §7: "Same decision model
+# for all question types by default; per-type override via env"). The env
+# names DECISION_MODEL_CHOICE / DECISION_MODEL_NOUL / DECISION_MODEL_SCORE
+# replace the primary /decisions model for that question type only; they are
+# read through per_type_model() below, whose literal os.getenv calls keep
+# every env name the agent reads greppable by a plain `os.getenv` scan
+# (issue acceptance clause 4).
 # Mirrors graph.py's message verbatim: one missing-key explanation, one fix.
 _NO_KEY_MESSAGE = (
     "OPENROUTER_API_KEY is not set. Copy agent/.env.example to agent/.env, add your "
     "OpenRouter key, and restart the agent."
 )
+
+
+def per_type_model(question_type):
+    """The DECISION_MODEL_<TYPE> override for one question type, or None.
+
+    Issue #19 (PRD §7): DECISION_MODEL_CHOICE / DECISION_MODEL_NOUL /
+    DECISION_MODEL_SCORE replace the primary decision model for answers of
+    that one type; every other primary setting (state, fallback chain,
+    timeout, base URL) stays shared. Values are read at client wiring time
+    (build_decision_client), so overrides apply on process boot / container
+    recreate — the same contract as DECISION_MODEL itself. An empty or
+    whitespace-only value counts as unset (no warning), mirroring
+    server.py's `os.getenv(...) or ...` idiom, so an emptied .env line
+    degrades to DECISION_MODEL instead of wiring a broken model string;
+    unknown question types (future kinds) read None too. Each lookup is a
+    literal os.getenv call — not a name built from a mapping — so a plain
+    grep of env reads finds every variable the agent honors.
+    """
+    if question_type == "choice":
+        raw = os.getenv("DECISION_MODEL_CHOICE")
+    elif question_type == "noul":
+        raw = os.getenv("DECISION_MODEL_NOUL")
+    elif question_type == "score":
+        raw = os.getenv("DECISION_MODEL_SCORE")
+    else:
+        return None
+    return (raw or "").strip() or None
 
 
 class TransportError(RuntimeError):
@@ -563,6 +605,68 @@ class FallbackChainTransport:
                 await closer()
 
 
+class TypeRoutedTransport:
+    """Question-type router over transports exposing ask_batch (issue #19).
+
+    Partitions one ask_batch call by question.type and dispatches each
+    partition CONCURRENTLY (asyncio.gather, the same fan-out the client
+    gives per-question transports) to the transport wired for that type —
+    build_decision_client routes a type to its own fallback chain whenever
+    the type's DECISION_MODEL_<TYPE> override is set, and sends everything
+    else to `default`, so future question kinds stay answered even when no
+    route names their type. Every sub-transport sees a plain ask_batch call,
+    so the router composes with any batch transport (FallbackChainTransport
+    included) and never owns retry semantics: exceptions propagate as-is,
+    resilience stays the chains' job. The per-partition mappings are merged
+    into one {id: raw_payload} dict — ids are unique per question set, so
+    the merge is lossless, and DecisionClient re-orders by walking the
+    original question list. ask_batch is the only surface DecisionClient
+    duck-types on, so the router deliberately exposes nothing else.
+    """
+
+    def __init__(self, routes, default):
+        if not isinstance(routes, dict) or not routes:
+            raise ValueError(
+                "TypeRoutedTransport needs a non-empty routes mapping "
+                "(question type -> transport)"
+            )
+        if default is None:
+            raise ValueError("TypeRoutedTransport needs a default transport")
+        self.routes = dict(routes)
+        self.default = default
+
+    async def ask_batch(self, questions):
+        """Partition by question.type, fan the partitions out concurrently,
+        merge the id -> raw payload mappings. Partitions run in first-question
+        order, so a recorded wire log is deterministic; question order inside
+        a partition is the input order, and decision parsing re-zips by id
+        anyway."""
+        partitions = {}
+        for question in questions:
+            partitions.setdefault(
+                self.routes.get(question.type, self.default), []
+            ).append(question)
+        results = await asyncio.gather(
+            *(
+                transport.ask_batch(batch)
+                for transport, batch in partitions.items()
+            )
+        )
+        merged = {}
+        for mapping in results:
+            merged.update(mapping)
+        return merged
+
+    async def aclose(self):
+        """Close every routed sub-transport (routes + default), defaulting to
+        the FallbackChainTransport idiom of skipping transports without an
+        aclose."""
+        for transport in [*self.routes.values(), self.default]:
+            closer = getattr(transport, "aclose", None)
+            if closer is not None:
+                await closer()
+
+
 def _warn_drop(question_id, answer_id, reason):
     """One WARNING per dropped payload, always naming the question id, the
     offending answer id (or <missing>) and the reason — a silently dropped
@@ -751,18 +855,38 @@ class DecisionClient:
 
 
 def build_decision_client(threshold=None):
-    """Wire the production decision client (issue #9): the OpenRouter
+    """Wire the production decision client (issues #9 and #19): the OpenRouter
     decisions-modality transport first, the chat structured-output fallback
     chain second, both under the bounded FallbackChainTransport.
 
-    Reads OPENROUTER_API_KEY / DECISION_MODEL / DECISION_FALLBACK_MODELS /
-    DECISION_TIMEOUT_S / OPENROUTER_BASE_URL at construction — a missing key
-    raises RuntimeError HERE, at wiring time (acceptance clause 4), not deep
-    inside the first live decide call.
+    With every per-type override (DECISION_MODEL_CHOICE/NOUL/SCORE, issue
+    #19) unset this is exactly the plain #9 wiring — one FallbackChainTransport
+    of DecisionsModalityTransport + ChatStructuredTransport. Each SET override
+    instead wires its own chain — same structure, with the override feeding
+    only the primary /decisions model, so DECISION_FALLBACK_MODELS stays the
+    common chat fallback — and build_decision_client wraps the per-type
+    chains (plus the plain chain as default) in a TypeRoutedTransport. Every
+    transport reads its own env at construction: overrides apply on process
+    boot / container recreate, never mid-process.
+
+    Reads OPENROUTER_API_KEY / DECISION_MODEL / DECISION_MODEL_<TYPE> /
+    DECISION_FALLBACK_MODELS / DECISION_TIMEOUT_S / OPENROUTER_BASE_URL at
+    construction — a missing key raises RuntimeError HERE, at wiring time
+    (acceptance clause 4), not deep inside the first live decide call.
     """
+
+    def _chain(model=None):
+        return FallbackChainTransport(
+            [DecisionsModalityTransport(model=model), ChatStructuredTransport()]
+        )
+
+    routes = {}
+    for question_type in ("choice", "noul", "score"):
+        override = per_type_model(question_type)
+        if override:
+            routes[question_type] = _chain(override)
+    if not routes:
+        return DecisionClient(_chain(), threshold=threshold)
     return DecisionClient(
-        FallbackChainTransport(
-            [DecisionsModalityTransport(), ChatStructuredTransport()]
-        ),
-        threshold=threshold,
+        TypeRoutedTransport(routes, _chain()), threshold=threshold
     )

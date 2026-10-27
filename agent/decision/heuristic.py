@@ -12,13 +12,16 @@ above the 0.6 default threshold (sales -> kpi_row/line_chart, churn ->
 variance_callout/data_table, quality -> data_quality_card), mirroring the
 golden queries issue #10's tests and the runtime gate exercise.
 
-Three roles, one implementation: the no-OPENROUTER-API_KEY decider (the
+Four roles, one implementation: the no-OPENROUTER-API_KEY decider (the
 README's "no key still boots" contract), the decide node's on-error
 fallback (any transport failure degrades to this, so `decisions` always
-carries 1..7 entries), and the deterministic stand-in tests and the
-runtime gate use when the live decision endpoint is unreachable. It never
-raises and never inspects state beyond the prompt text — same dual-import
-contract as the rest of the decision package.
+carries 1..7 entries), the off-catalog safety gate's transport in the
+decide node (issue #18: a query `classify` routes to `off_catalog` is
+answered here without consulting the wired model), and the deterministic
+stand-in tests and the runtime gate use when the live decision endpoint
+is unreachable. It never raises and never inspects state beyond the
+prompt text — same dual-import contract as the rest of the decision
+package.
 
 `model = "heuristic"` is declared so the decide node can attribute answers
 truthfully instead of guessing the chain's model label — and so
