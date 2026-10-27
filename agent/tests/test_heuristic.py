@@ -122,3 +122,31 @@ def test_ask_never_raises_on_hostile_prompts():
     for question in hostile:
         payload = _ask(question)
         assert payload["id"] == question.id
+
+
+def test_data_problem_noul_carries_the_banner_gate_probability():
+    """Issue #17: the data_problem noul's p(yes) IS the data-problem
+    probability — the value decisions[] ships and the DQ card's banner
+    gates on — so each heuristic route's canned value must sit exactly
+    where the golden paths need it: quality ≈0.94 (the PRD's ≈0.94, above
+    the 0.7 decision clause and the 0.6 banner gate), the real-change
+    routes low (a priced churn spike or a sales ramp is not a data
+    problem), off-catalog neutral."""
+    expected = {
+        "Is the data clean? Check for duplicates and nulls": ("quality", 0.94),
+        "Why did churn spike after the pricing change?": ("churn", 0.06),
+        "Show me sales in Q3": ("sales", 0.06),
+        "Tell me a joke about pirates": ("off_catalog", 0.25),
+    }
+    for query, (route, probability) in expected.items():
+        question = next(
+            q
+            for q in _question_set(query)
+            if q.id == questions_module.DATA_PROBLEM_QUESTION_ID
+        )
+        payload = _ask(question)
+        assert payload["id"] == questions_module.DATA_PROBLEM_QUESTION_ID
+        assert payload["type"] == "noul"
+        value = payload["probabilities"]
+        assert isinstance(value, float) and not isinstance(value, bool)
+        assert value == probability, (query, route, value)

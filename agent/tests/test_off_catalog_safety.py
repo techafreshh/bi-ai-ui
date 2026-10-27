@@ -160,8 +160,8 @@ def test_missing_catalog_answer_falls_back_to_grid_single_insight(
     endorsement at all and the final a2ui is the grid with exactly one
     non-empty-body insight_text item."""
     answers = {
-        questions_module.REAL_CHANGE_QUESTION_ID: {
-            "id": questions_module.REAL_CHANGE_QUESTION_ID,
+        questions_module.DATA_PROBLEM_QUESTION_ID: {
+            "id": questions_module.DATA_PROBLEM_QUESTION_ID,
             "type": "noul",
             "probabilities": 0.7,
         },

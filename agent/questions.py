@@ -20,14 +20,15 @@ deliberately rejected: non-deterministic, an extra round trip, and issue
 `build_question_set` assembles the registered catalog question set (PRD
 §8/§9): exactly one ChoiceQuestion over the six catalog component types
 (its answer's per-option probabilities are what the layout node's
-threshold cut consumes) plus the two Noul questions (real change vs. data
-problem, anomaly worth calling out) and one Score question (data-quality
-confidence). Every prompt quotes the user message VERBATIM and inlines a
-compact KPI/DQ summary from read_state's snapshot — transports key answers
-by question id, so per-query information can only enter through the
-prompt. The set is capped at MAX_DECISION_QUESTIONS (7, the decide node's
-fan-out budget, PRD's "≤7 parallel decision calls"); the fixed four stay
-well inside it and the assert guards future edits.
+threshold cut consumes) plus the two Noul questions (data problem — its
+p(yes) reads directly as the data_problem probability the DQ card's
+banner gates on, issue #17 — and anomaly worth calling out) and one Score
+question (data-quality confidence). Every prompt quotes the user message
+VERBATIM and inlines a compact KPI/DQ summary from read_state's snapshot —
+transports key answers by question id, so per-query information can only
+enter through the prompt. The set is capped at MAX_DECISION_QUESTIONS (7,
+the decide node's fan-out budget, PRD's "≤7 parallel decision calls");
+the fixed four stay well inside it and the assert guards future edits.
 
 Stdlib only — the mirrors catalog.py/decision/schemas.py leaf contract, so
 the graph node imports it inside the async hot path without dragging the
@@ -69,7 +70,11 @@ MAX_DECISION_QUESTIONS = 7
 # looks the catalog answer up by id, and transports (Mock/Heuristic) key
 # per-question behavior off the prompts built here.
 CATALOG_QUESTION_ID = "catalog_components"
-REAL_CHANGE_QUESTION_ID = "real_change_vs_data_problem"
+# Issue #17: the former real_change_vs_data_problem noul (p(yes) = "real
+# change", leaving every consumer to compute 1 - p) is flipped — id
+# "data_problem", p(yes) = "this movement is a data-quality problem" — so
+# decisions[] carries the banner-gate probability directly.
+DATA_PROBLEM_QUESTION_ID = "data_problem"
 ANOMALY_QUESTION_ID = "anomaly_callout"
 DQ_CONFIDENCE_QUESTION_ID = "dq_confidence"
 
@@ -314,10 +319,11 @@ def build_question_set(query_text, snapshot):
             options=list(CATALOG_TYPES),
         ),
         NoulQuestion(
-            id=REAL_CHANGE_QUESTION_ID,
+            id=DATA_PROBLEM_QUESTION_ID,
             prompt=(
                 context
-                + "Is this movement real business change vs. a data problem? "
+                + "Is the movement in this window better explained by a "
+                "data-quality problem than by a real business change? "
                 "Answer yes or no."
             ),
         ),

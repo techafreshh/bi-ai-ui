@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 import {
   COMPONENT_TYPES,
+  a2uiFromState,
   componentPropsSchemas,
   parseA2UILayout,
   validateComponentProps,
@@ -126,6 +127,34 @@ describe("catalog contract (acceptance: types and prop names match agent/catalog
       "data_quality_card",
       "insight_text",
     ]);
+  });
+});
+
+describe("a2uiFromState (issue #17: tolerant state extraction)", () => {
+  const layout = { v: 1, layout: "grid", items: [], slotCopy: {} };
+
+  it("returns the parsed layout from a state carrying a2ui", () => {
+    expect(a2uiFromState({ a2ui: layout, decisions: [], status: "done" })).toEqual(
+      layout,
+    );
+  });
+
+  it("returns null when a2ui is absent (own-property check only)", () => {
+    expect(a2uiFromState({ decisions: [] })).toBeNull();
+    // Inherited Object.prototype members must not read as an a2ui payload.
+    expect(a2uiFromState(Object.create({ a2ui: layout }))).toBeNull();
+  });
+
+  it("returns null for an invalid a2ui payload", () => {
+    expect(a2uiFromState({ a2ui: { v: 2, layout: "grid", items: [] } })).toBeNull();
+    expect(a2uiFromState({ a2ui: "garbage" })).toBeNull();
+  });
+
+  it("returns null for non-object states", () => {
+    expect(a2uiFromState(null)).toBeNull();
+    expect(a2uiFromState(undefined)).toBeNull();
+    expect(a2uiFromState("state")).toBeNull();
+    expect(a2uiFromState(["a2ui"])).toBeNull();
   });
 });
 

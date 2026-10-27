@@ -20,6 +20,7 @@ from ag_ui.core.types import RunAgentInput, UserMessage
 from ag_ui.encoder import EventEncoder
 from copilotkit import LangGraphAGUIAgent
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import HumanMessage
 
 import catalog
 import db
@@ -191,27 +192,28 @@ def test_golden_churn_streams_callout_cause_and_cohort(seeded_db, monkeypatch):
     assert first[0] == 1.0 and first[1] == 40  # the seed's pinned spike
 
 
-def test_golden_churn_noul_decision_carries_real_and_data_problem(
+def test_golden_churn_noul_decision_is_the_data_problem_probability(
     seeded_db, monkeypatch
 ):
-    """Clause 3: the first churn response's decisions[] carries the noul
-    real_change_vs_data_problem decision with a {real, data_problem}
-    probability dict summing to 1.0 (+/- 0.05) and the pick naming the
-    argmax key."""
+    """Clause 3 (issue #16; shape as flattened by #17): the churn query's
+    decisions[] carries exactly one data_problem noul whose probabilities
+    is the scalar p(movement is a data problem) in [0, 1] — under the
+    heuristic the churn route reads 0.06, so the scalar stays below the
+    0.5 pick line and the banner gate alike."""
     _, snapshots = _run_sse(monkeypatch, message="Why did churn spike in August?")
     decisions = _final_state(snapshots)["decisions"]
     matches = [
         d for d in decisions
-        if d["id"] == agent_graph.questions.REAL_CHANGE_QUESTION_ID
+        if d["id"] == agent_graph.questions.DATA_PROBLEM_QUESTION_ID
     ]
     assert len(matches) == 1, decisions
     decision = matches[0]
     assert decision["type"] == "noul", decision
-    probabilities = decision["probabilities"]
-    assert isinstance(probabilities, dict), decision
-    assert set(probabilities) == {"real", "data_problem"}, decision
-    assert abs(sum(probabilities.values()) - 1.0) <= 0.05, decision
-    assert decision["pick"] in {"real", "data_problem"}, decision
+    probability = decision["probabilities"]
+    assert isinstance(probability, float) and not isinstance(probability, bool)
+    assert 0.0 <= probability <= 1.0, decision
+    assert decision["pick"] in {"yes", "no"}, decision
+    assert probability < 0.5 and decision["pick"] == "no", decision
 
 
 def test_investigate_followup_runs_cohort_drilldown(seeded_db, monkeypatch):
@@ -419,6 +421,176 @@ def test_fill_routes_parsed_copy_into_slots(seeded_db, monkeypatch):
     final_messages = _final_state(snapshots)["messages"]
     assert final_messages[-1]["type"] == "ai"
     assert final_messages[-1]["content"] == "done"
+
+
+# --- Issue #17: golden path C — data-quality surfacing --------------------
+
+
+def test_data_problem_probability_extraction():
+    """The tolerant extraction mirrors _catalog_probabilities: the
+    data_problem noul's scalar is clamped into [0, 1]; anything else
+    (missing list, missing id, malformed value, bool) reads 0.0 so the
+    banner gate stays shut instead of raising."""
+    question_id = agent_graph.questions.DATA_PROBLEM_QUESTION_ID
+    decisions = [
+        {
+            "id": agent_graph.questions.CATALOG_QUESTION_ID,
+            "type": "choice",
+            "probabilities": {"data_quality_card": 0.95},
+        },
+        {"id": question_id, "type": "noul", "probabilities": 0.94},
+    ]
+    assert agent_graph._data_problem_probability(decisions) == 0.94
+    assert agent_graph._data_problem_probability(decisions[:1]) == 0.0
+    assert agent_graph._data_problem_probability(None) == 0.0
+    assert agent_graph._data_problem_probability([]) == 0.0
+    assert agent_graph._data_problem_probability(
+        [{"id": question_id, "probabilities": "high"}]
+    ) == 0.0
+    assert agent_graph._data_problem_probability(
+        [{"id": question_id, "probabilities": True}]
+    ) == 0.0
+    # Clamping: a misbehaving transport can never push the gate past [0, 1].
+    assert agent_graph._data_problem_probability(
+        [{"id": question_id, "probabilities": 1.5}]
+    ) == 1.0
+    assert agent_graph._data_problem_probability(
+        [{"id": question_id, "probabilities": -0.4}]
+    ) == 0.0
+
+
+def _dq_card_layout(props):
+    """One data_quality_card layout through the real schema — _dq_slot_copy
+    reads exactly what A2UILayout validates."""
+    return catalog.A2UILayout.model_validate(
+        {"items": [{"type": "data_quality_card", "props": props}]}
+    ).model_dump()
+
+
+def test_dq_slot_copy_names_failing_checks_and_detail():
+    """Clause 4's writer: the deterministic summary names the failing
+    checks verbatim (carrying the literal 'duplicate'/'null' substrings)
+    and appends the narrated detail (carrying 'Sep' and 'Startup')."""
+    detail = (
+        "duplicate and null usage rows cluster in Sep 8-21, 2026 "
+        "(2026-09-08..2026-09-21), Startup segment"
+    )
+    copy = agent_graph._dq_slot_copy(
+        _dq_card_layout(
+            {
+                "checks": [
+                    {"name": "freshness", "status": "ok", "score": 1.0},
+                    {"name": "duplicates", "status": "fail", "score": 0.87},
+                    {"name": "nulls", "status": "fail", "score": 0.95},
+                ],
+                "data_problem": 0.94,
+                "data_problem_detail": detail,
+            }
+        )
+    )
+    assert copy.startswith(
+        "Data-quality checks failing: duplicates, nulls — "
+    ), copy
+    assert detail in copy
+
+
+def test_dq_slot_copy_all_passing_and_unread_variants():
+    """The other two deterministic variants: checks that all pass read the
+    all-passing line (detail still appended when present); empty/missing
+    checks (degraded snapshot) read the could-not-read line without a
+    detail; no DQ card in the layout reads None so fill writes no orphan
+    key."""
+    detail = "duplicate and null usage rows cluster in Sep 8-14, 2026"
+    all_pass = agent_graph._dq_slot_copy(
+        _dq_card_layout(
+            {
+                "checks": [
+                    {"name": "freshness", "status": "ok", "score": 1.0},
+                    {"name": "duplicates", "status": "ok", "score": 1.0},
+                    {"name": "nulls", "status": "ok", "score": 0.99},
+                ],
+                "data_problem_detail": detail,
+            }
+        )
+    )
+    assert all_pass.startswith(
+        "All data-quality checks pass for this window. — "
+    ), all_pass
+    assert detail in all_pass
+
+    unread = agent_graph._dq_slot_copy(_dq_card_layout({"checks": []}))
+    assert unread == "Data-quality checks could not be read for this window."
+
+    # A MISSING checks key (only reachable through a raw dict — the schema
+    # requires the field) degrades to the same could-not-read variant.
+    assert agent_graph._dq_slot_copy(
+        {"items": [{"type": "data_quality_card", "props": {}}]}
+    ) == "Data-quality checks could not be read for this window."
+
+    no_card = catalog.fallback_layout().model_dump()
+    assert agent_graph._dq_slot_copy(no_card) is None
+
+
+def test_dq_problem_detail_humanizes_the_scope():
+    """The banner's evidence line: narrated window ('Sep 8-21, 2026' with
+    the ASCII hyphen, ISO range in parens) plus the segment — malformed
+    scopes total to None instead of breaking the card refresh."""
+    assert agent_graph._dq_problem_detail(
+        {"start": "2026-09-08", "end": "2026-09-21", "segment": "Startup"}
+    ) == (
+        "duplicate and null usage rows cluster in Sep 8-21, 2026 "
+        "(2026-09-08..2026-09-21), Startup segment"
+    )
+    assert agent_graph._dq_problem_detail(
+        {"start": "2026-09-28", "end": "2026-10-02", "segment": "Startup"}
+    ) == (
+        "duplicate and null usage rows cluster in Sep 28-Oct 2, 2026 "
+        "(2026-09-28..2026-10-02), Startup segment"
+    )
+    assert agent_graph._dq_problem_detail({"start": "garbage", "end": "x"}) is None
+    assert agent_graph._dq_problem_detail(None) is None
+    with pytest.raises(ValueError):
+        agent_graph._humanize_day_range("2026-09-21", "2026-09-08")
+
+
+def test_read_state_stores_dq_scope_and_scopes_dq_checks(seeded_db):
+    """Clause 1's context: read_state detects the anomaly window (on the
+    seeded DB exactly the Sept 8-21 Startup plant) and scopes the decision
+    context's dq_checks to it — duplicates/nulls fail right there, without
+    waiting for the query node."""
+    result = asyncio.run(
+        agent_graph.read_state(
+            {"messages": [HumanMessage(content="Is the data clean?")]}
+        )
+    )
+    snapshot = result["snapshot"]
+    assert snapshot["dq_scope"] == {
+        "start": "2026-09-08",
+        "end": "2026-09-21",
+        "segment": "Startup",
+    }
+    statuses = {
+        check["name"]: check["status"] for check in snapshot["dq_checks"]
+    }
+    assert statuses == {"freshness": "ok", "duplicates": "fail", "nulls": "fail"}
+
+
+def test_read_state_dq_scope_is_none_on_a_missing_db(tmp_path):
+    """Degrade contract: an unreadable DB leaves dq_scope None (and the
+    snapshot degraded) instead of raising — the anomaly detection never
+    breaks the run."""
+    original = db.DEFAULT_DB_PATH
+    db.DEFAULT_DB_PATH = tmp_path / "missing.db"
+    try:
+        result = asyncio.run(
+            agent_graph.read_state(
+                {"messages": [HumanMessage(content="Is the data clean?")]}
+            )
+        )
+    finally:
+        db.DEFAULT_DB_PATH = original
+    assert result["snapshot"]["degraded"] is True
+    assert result["snapshot"]["dq_scope"] is None
 
 
 # --- Resilience: no DB, no key -------------------------------------------------

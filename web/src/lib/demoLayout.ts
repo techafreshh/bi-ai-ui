@@ -1,8 +1,9 @@
 // Issue #12: the demo canvas fixture — one A2UI layout (PRD §10 envelope,
-// valid per parseA2UILayout) carrying all six catalog types. The canvas is
-// fixture-driven until the chat issues (#33/#36) land; the shape mirrors what
-// agent/catalog.py would emit for the README's planted Q3-2026 story, and
-// `agent/quality.py`'s _CHECK_NAMES order (freshness, duplicates, nulls).
+// valid per parseA2UILayout) carrying all six catalog types. Since issue #17
+// the canvas renders the agent's streamed a2ui once a run completes; this
+// fixture is the pre-run fallback and the dev/test bed. The shape mirrors
+// what agent/catalog.py would emit for the README's planted Q3-2026 story,
+// and `agent/quality.py`'s _CHECK_NAMES order (freshness, duplicates, nulls).
 // Table rows are generated, not hand-listed — the schema caps data_table at
 // 50 rows (PRD §7).
 

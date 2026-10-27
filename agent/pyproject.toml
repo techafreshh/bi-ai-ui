@@ -37,6 +37,7 @@ dependencies = [
 # Tests import server/graph from the project root (no packaged install).
 pythonpath = ["."]
 testpaths = ["tests"]
-# golden_q3.py is the issue #15-named file, not a test_* glob match, so it
-# is registered explicitly to stay collected by a bare `pytest` run.
-python_files = ["test_*.py", "*_test.py", "golden_q3.py"]
+# golden_q3.py (issue #15) and golden_dq.py (issue #17) are issue-named
+# files, not test_* glob matches, so they are registered explicitly to stay
+# collected by a bare `pytest` run.
+python_files = ["test_*.py", "*_test.py", "golden_q3.py", "golden_dq.py"]

@@ -250,3 +250,127 @@ def test_default_scope_is_trailing_30_days(seeded_db):
     unscoped = quality.run_checks()
     assert unscoped == quality.run_checks(start.isoformat(), end.isoformat())
     assert [check["status"] for check in unscoped] == ["ok", "fail", "warn"]
+
+
+# --- Issue #17: recent_problem_scope — anomaly-window detection ---------------
+
+
+def test_recent_problem_scope_finds_the_seeded_bug_window(seeded_db):
+    """Issue #17 acceptance anchor: on the seeded DB the detection lands
+    exactly on the planted Sept ingest bug — {start 2026-09-08, end
+    2026-09-21, segment Startup} — the same window test_seeded_bug_window
+    _statuses proves reads duplicates fail / nulls fail / freshness ok."""
+    assert quality.recent_problem_scope() == {
+        "start": "2026-09-08",
+        "end": "2026-09-21",
+        "segment": "Startup",
+    }
+
+
+def test_recent_problem_scope_clean_fixture_reads_none(tmp_path, monkeypatch):
+    """A genuinely clean DB (distinct non-null usage rows only) has no dirty
+    days to clip to — the detection reads None so callers keep their own
+    scoping instead of inheriting an invented window."""
+    db_path = build_fixture(tmp_path / "clean.db", _clean_rows((1, 2, 3), BUG_DAYS))
+    monkeypatch.setattr(db, "DEFAULT_DB_PATH", db_path)
+    assert quality.recent_problem_scope() is None
+
+
+def test_recent_problem_scope_empty_db_reads_none(tmp_path, monkeypatch):
+    """An eventless DB has no anchor day — the detection degrades to None
+    (mirroring run_checks' empty-scope reading) instead of raising."""
+    db_path = build_fixture(tmp_path / "empty.db", [])
+    monkeypatch.setattr(db, "DEFAULT_DB_PATH", db_path)
+    assert quality.recent_problem_scope() is None
+
+
+def test_recent_problem_scope_lookback_excludes_old_plants(tmp_path, monkeypatch):
+    """The trailing lookback bounds the scan: duplicate plants on Sept 8-10
+    fall OUTSIDE a 1-day lookback ending at the trailing data's own latest
+    day (2027-01-15), so an old bug is not reported as the recent problem
+    (the anchor is the data's latest day, never a wall clock)."""
+    dirty = [
+        (1, "2026-09-08", USAGE_METRIC, 100),
+        (1, "2026-09-08", USAGE_METRIC, 100),
+        (1, "2026-09-09", USAGE_METRIC, 200),
+        (1, "2026-09-09", USAGE_METRIC, 200),
+        (1, "2026-09-10", USAGE_METRIC, 300),
+        (1, "2026-09-10", USAGE_METRIC, 300),
+    ]
+    # Trailing clean rows push the anchor to 2027-01-15: a 1-day lookback
+    # then covers only 2027-01-15 itself, leaving the Sept plants unseen.
+    trailing = [
+        (2, (date(2026, 9, 8) + timedelta(days=offset)).isoformat(), USAGE_METRIC, 400)
+        for offset in range((date(2027, 1, 15) - date(2026, 9, 8)).days + 1)
+    ]
+    db_path = build_fixture(tmp_path / "stale.db", dirty + trailing)
+    monkeypatch.setattr(db, "DEFAULT_DB_PATH", db_path)
+    assert quality.recent_problem_scope(lookback_days=1) is None
+    # Widening the lookback past the clean gap finds the old plants again.
+    assert quality.recent_problem_scope(lookback_days=200) == {
+        "start": "2026-09-08",
+        "end": "2026-09-10",
+        "segment": "Startup",
+    }
+
+
+def test_recent_problem_scope_run_and_majority_segment(tmp_path, monkeypatch):
+    """The reported scope is the contiguous dirty-day run ending at the
+    latest dirty day, with the majority segment OF that run: Startup dup
+    rows on Sept 8-9 and Growth dup rows on Sept 12 (Sept 10-11 clean)
+    scope to Sept 12 alone, segment Growth — the older Startup days sit
+    outside the contiguous tail and must not label the window."""
+    rows = [
+        (1, "2026-09-08", USAGE_METRIC, 100),
+        (1, "2026-09-08", USAGE_METRIC, 100),
+        (2, "2026-09-09", USAGE_METRIC, 200),
+        (2, "2026-09-09", USAGE_METRIC, 200),
+        (3, "2026-09-12", USAGE_METRIC, 300),
+        (3, "2026-09-12", USAGE_METRIC, 300),
+    ]
+    segments = {1: "Startup", 2: "Startup", 3: "Growth"}
+    db_path = build_fixture(tmp_path / "mixed.db", rows, segments)
+    monkeypatch.setattr(db, "DEFAULT_DB_PATH", db_path)
+    assert quality.recent_problem_scope() == {
+        "start": "2026-09-12",
+        "end": "2026-09-12",
+        "segment": "Growth",
+    }
+
+
+def test_recent_problem_scope_validates_lookback_days(seeded_db):
+    """Fail-loud input contract: a non-positive, non-integer or bool
+    lookback_days raises ValueError before any SQL runs (bools are the ints
+    they subclass and are rejected explicitly)."""
+    for bad in (0, -1, "30", 1.5, None, True):
+        with pytest.raises(ValueError):
+            quality.recent_problem_scope(bad)
+
+
+def test_latest_dirty_run_takes_the_contiguous_tail():
+    """Pure contiguity clipper: the run ENDS at the latest dirty day and
+    walks back only across back-to-back dirty days — a clean day breaks the
+    walk (older dirt is excluded), a single day scopes to itself, empty
+    input reads None and non-ISO entries raise ValueError."""
+    # Full run: every day from the 8th to the 21st is dirty.
+    full = [
+        (date(2026, 9, 8) + timedelta(days=offset)).isoformat()
+        for offset in range(14)
+    ]
+    assert quality._latest_dirty_run(full) == ("2026-09-08", "2026-09-21")
+    # A clean Sept 10-11 pair splits the days: the tail run is the 12th on.
+    split = [
+        "2026-09-08", "2026-09-09",
+        "2026-09-12", "2026-09-13", "2026-09-14",
+    ]
+    assert quality._latest_dirty_run(split) == ("2026-09-12", "2026-09-14")
+    # Order and duplicates in the input do not matter; a clean day between
+    # dirty days still breaks the run (Sept 13 is clean), and one day is
+    # its own run.
+    assert quality._latest_dirty_run(
+        ["2026-09-14", "2026-09-12", "2026-09-12"]
+    ) == ("2026-09-14", "2026-09-14")
+    assert quality._latest_dirty_run(["2026-09-08"]) == ("2026-09-08", "2026-09-08")
+    assert quality._latest_dirty_run([]) is None
+    with pytest.raises(ValueError):
+        quality._latest_dirty_run(["2026-09-08", "not-a-date"])

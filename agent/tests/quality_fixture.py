@@ -34,13 +34,15 @@ _USAGE_INSERT = (
 )
 
 
-def build_fixture(path, usage_rows):
+def build_fixture(path, usage_rows, segments=None):
     """Create a fresh fixture DB at `path` holding the generator's schema
     and exactly `usage_rows` in usage_events — one synthetic account per
-    distinct account_id referenced (name/segment/plan are fixed
+    distinct account_id referenced (name/plan/arr/created_at are fixed
     placeholders the checks never read). Rows are (account_id, event_date,
     metric, units) tuples, mirroring the generator's insert column order.
-    Returns the path."""
+    `segments` optionally maps account_id -> accounts.segment (issue #17's
+    problem detection reads the segment); None keeps the historical
+    all-Startup default. Returns the path."""
     if path.exists():
         # Unlink first so reruns over an existing path are idempotent
         # instead of appending onto the old rows and skewing every share.
@@ -49,11 +51,19 @@ def build_fixture(path, usage_rows):
     try:
         conn.executescript(SCHEMA_SQL)
         account_ids = sorted({row[0] for row in usage_rows})
+        segments = segments or {}
         conn.executemany(
             "INSERT INTO accounts (id, name, segment, plan, arr_cents, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
-                (account_id, f"Fixture Co {account_id}", "Startup", "Starter", 180_000, "2024-10-01")
+                (
+                    account_id,
+                    f"Fixture Co {account_id}",
+                    segments.get(account_id, "Startup"),
+                    "Starter",
+                    180_000,
+                    "2024-10-01",
+                )
                 for account_id in account_ids
             ),
         )

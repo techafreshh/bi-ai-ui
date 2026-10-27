@@ -82,7 +82,18 @@ export const componentPropsSchemas: Record<A2UIComponentType, z.ZodType> = {
       filters: z.array(z.string()).default([]),
     })
     .strict(),
-  data_quality_card: z.object({ checks: z.array(dataQualityCheckSchema) }).strict(),
+  // catalog.DataQualityCardProps: checks required; issue #17 adds the
+  // optional agent-stamped data_problem (the banner gate p, str|None
+  // counterpart below) and data_problem_detail (the narrated evidence
+  // line) — absent on fixture/older renders, so nullish like the callout's
+  // optional slots.
+  data_quality_card: z
+    .object({
+      checks: z.array(dataQualityCheckSchema),
+      data_problem: z.number().nullish(),
+      data_problem_detail: z.string().nullish(),
+    })
+    .strict(),
   insight_text: z.object({ title: z.string(), body: z.string() }).strict(),
 };
 
@@ -157,4 +168,21 @@ export function validateComponentProps(
   const result = schema.safeParse(props);
   if (result.success) return { ok: true, data: result.data };
   return { ok: false, error: formatZodError(result.error) };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Extract the PRD §10 layout from an AG-UI state snapshot (issue #17).
+// Tolerant like decisionsFromState: a non-object state, an inherited `a2ui`
+// key, or a payload failing parseA2UILayout all yield null — the consuming
+// hook keeps the previous layout instead of breaking the render mid-run.
+export function a2uiFromState(state: unknown): A2UILayout | null {
+  if (!isPlainObject(state)) return null;
+  // Own-property-only lookup (same hazard as the schema map above):
+  // prototype-chain members must yield null, never a parsed layout.
+  if (!Object.hasOwn(state, "a2ui")) return null;
+  const parsed = parseA2UILayout(state.a2ui);
+  return parsed.ok ? parsed.data : null;
 }
