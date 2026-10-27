@@ -1,20 +1,14 @@
-import { CopilotKitProvider, CopilotSidebar } from "@copilotkit/react-core/v2";
+import { CopilotKitProvider } from "@copilotkit/react-core/v2";
 import { HttpAgent } from "@ag-ui/client";
 import "@copilotkit/react-core/v2/styles.css";
 import { DashboardCanvas } from "./components/DashboardCanvas";
 import { DecisionDrawer } from "./components/DecisionDrawer";
 import { ThemeToggle } from "./components/ui/theme-toggle";
+import { ChatSidebar } from "./components/ui/chat/ChatSidebar";
 import { useDecisions } from "./hooks/useDecisions";
 import { InvestigateProvider } from "./hooks/useInvestigate";
 import { ThemeProvider } from "./lib/theme";
-
-// PRD v1.1: the provider talks to the agent's FastAPI endpoint directly —
-// browser → AG-UI SSE on :8123, no Node runtime in between. This requires the
-// agent's CORS config to allow http://localhost:5173.
-const AGENT_URL = "http://localhost:8123/copilotkit";
-
-// Must match the LangGraphAGUIAgent name in agent/server.py.
-const AGENT_ID = "bi_agent";
+import { AGENT_ID, AGENT_URL } from "./lib/agent";
 
 const biAgent = new HttpAgent({ agentId: AGENT_ID, url: AGENT_URL });
 
@@ -47,11 +41,7 @@ function AppShell() {
           <DashboardCanvas />
         </main>
       </InvestigateProvider>
-      <CopilotSidebar
-        agentId={AGENT_ID}
-        defaultOpen
-        labels={{ chatInputPlaceholder: "Type a message…" }}
-      />
+      <ChatSidebar />
     </div>
   );
 }
