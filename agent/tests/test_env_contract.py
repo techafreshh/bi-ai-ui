@@ -10,8 +10,6 @@ turned into a graded test. Pure file scanning + imports, no network.
 import re
 from pathlib import Path
 
-import pytest
-
 import config
 import decision.client
 

@@ -10,10 +10,7 @@ stay inside the decide node's 7-question fan-out budget.
 
 import datetime as dt
 
-import pytest
-
 import questions
-
 
 # --- resolve_window -----------------------------------------------------------
 

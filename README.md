@@ -135,7 +135,26 @@ it (the heuristic fallback reports `"heuristic"`, never a guessed string).
 
 ## Demo script
 
-TODO — scripted golden-path demo for reviewers, finalizing in a later issue.
+A 90-second tour of the three golden paths. Setup once (`cp agent/.env.example
+agent/.env`, `docker compose up`), then open http://localhost:5173 and
+type each query into the sidebar prompt (`Type a message…`). No API key is
+needed — without one the decider runs its deterministic heuristic transport
+and the narrative is KPI-grounded copy.
+
+| Time | You type | The canvas assembles |
+|---|---|---|
+| 0:00 | `Show me sales in Q3` | Four KPI tiles (net-new ARR, MRR, NRR, accounts, each labelled with the `2026-07-01..2026-09-30` window) plus an ARR trend line chart over Jul–Sep 2026; the chat answers with a mini-card and a one-line summary. |
+| 0:25 | `Why did churn spike in August?` | A variance callout (`churn rate moved +100%` vs the trailing 6-month average, cause: the Aug-10 pricing change) above a 40-row cohort table (segment, MRR, tenure_months, plan). Press **Investigate** on the callout to drill into the Growth cohort on the same thread. |
+| 0:50 | `Is the data clean?` | A data-quality card (Freshness ok, Duplicates fail, Nulls fail) under a warning banner naming the Sep 8–21 Startup ingest bug, with a **Report an issue** button. Open the **Decision log** in the header to see all four decisions with probabilities, model and latency. |
+| 1:15 | `draw me a dragon` (optional) | An off-catalog query renders only the insight-text fallback — the control layer never invents components. |
+
+![Q3 sales dashboard: KPI tiles and ARR trend chart](docs/screenshot-q3-dashboard.png)
+
+![Churn drill-down: variance callout with the Investigate CTA and cohort table](docs/screenshot-churn-drilldown.png)
+
+![Data-quality card with the failing-checks banner and Report an issue](docs/screenshot-data-quality.png)
+
+![Decision log drawer: four decisions with probabilities, model and latency](docs/screenshot-decision-log.png)
 
 ## Model swap guide
 
@@ -161,3 +180,28 @@ docker compose up -d agent   # recreate with the edited .env
 Then ask a question: the Decision drawer shows the active model strings
 per decision, and `docker compose exec agent printenv DECISION_MODEL`
 confirms the compose-provided value without rebuilding the image.
+
+## Verification
+
+The PRD §11 checklist is executable — no manual clicking required:
+
+```bash
+docker compose up -d            # boot agent :8123 + web :5173 (self-seeds data/app.db)
+python3 scripts/verify_demo.py  # 15 stdlib-only HTTP/state probes, exit 0 on green
+```
+
+The probe suite waits for the stack, re-runs the Q3 query until the
+background seed lands, then checks the Q3 path (`kpi_row` + `line_chart`
+over `2026-07-01..2026-09-30` + non-empty reply), the churn path
+(`variance_callout` with pricing cause + 38–50-row cohort table), the DQ
+path (`duplicates:fail, nulls:fail, freshness:ok` + `data_problem` p>0.7),
+≥4 decisions with `model` + `latency_ms` on every golden query, the
+off-catalog fallback (only `insight_text`, all decisions sub-threshold),
+and a clean `RUN_FINISHED` on every run — printing one `[ok]`/`[FAIL]`
+line per check plus a summary count.
+
+```bash
+cd web && npm run lint && npm run typecheck && npm run test
+cd agent && uv run ruff check . && uv run pytest
+npm run screenshots --prefix web   # recapture docs/*.png from the live app
+```

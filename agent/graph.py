@@ -64,14 +64,14 @@ from pydantic import ValidationError
 from typing_extensions import Annotated, NotRequired, TypedDict
 
 try:  # package-style entry (import agent.graph from the repo root)
-    from agent import catalog, quality, questions, queries
+    from agent import catalog, quality, queries, questions
     from agent.decision import client as decision_client
     from agent.decision.heuristic import HeuristicTransport, classify
 except ModuleNotFoundError:  # script-style entry (tests, server.py from agent/)
     import catalog
     import quality
-    import questions
     import queries
+    import questions
     from decision import client as decision_client
     from decision.heuristic import HeuristicTransport, classify
 

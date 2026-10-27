@@ -58,3 +58,26 @@ except ModuleNotFoundError:  # script-style entry (import decision from agent/)
         ScoreQuestion,
         top_probability,
     )
+
+# Re-export surface for `from decision import X` consumers (ruff F401 reads
+# __all__ as the use-site, so the dual-import blocks above stay flagged as
+# intentional re-exports rather than dead imports).
+__all__ = [
+    "DEFAULT_THRESHOLD",
+    "MAX_ATTEMPTS_PER_TRANSPORT",
+    "Answer",
+    "ChatStructuredTransport",
+    "ChoiceQuestion",
+    "DecisionClient",
+    "DecisionsModalityTransport",
+    "FallbackChainTransport",
+    "MockTransport",
+    "NoulQuestion",
+    "Question",
+    "ScoreQuestion",
+    "TransportError",
+    "TypeRoutedTransport",
+    "build_decision_client",
+    "per_type_model",
+    "top_probability",
+]

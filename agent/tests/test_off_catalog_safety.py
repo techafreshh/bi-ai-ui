@@ -16,8 +16,8 @@ import uuid
 from fastapi.testclient import TestClient
 
 import catalog
-import questions as questions_module
 import graph as agent_graph
+import questions as questions_module
 from decision.client import DecisionClient, MockTransport
 from server import app
 from tests.test_graph import (
@@ -26,6 +26,7 @@ from tests.test_graph import (
     _heuristic_client,
     _run_sse,
 )
+
 # The seeded DB itself is the suite-wide shared seed: tests/conftest.py
 # provides the `seeded_db` fixture these tests consume by name.
 
