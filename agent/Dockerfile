@@ -14,6 +14,11 @@ RUN uv sync --frozen --no-install-project
 
 COPY . .
 
+# Seed entrypoint (issue #21): synchronous generate_data.py run when
+# data/app.db is absent or RESEED=1, then execs CMD. No secrets here.
+RUN chmod +x /app/docker-entrypoint.sh
+
 EXPOSE 8123
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uv", "run", "--no-sync", "python", "server.py"]

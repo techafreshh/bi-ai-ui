@@ -81,6 +81,18 @@ docker compose up
 
 - SPA: http://localhost:5173 — open it and chat in the sidebar ("ping").
 - Agent: http://localhost:8123 — `GET /health` returns exactly `{"status": "ok"}`.
+- The agent entrypoint generates `data/app.db` on first boot (skipped when
+  the file exists); `RESEED=1 docker compose up -d agent` forces a fresh
+  deterministic reseed even when it exists.
+
+Reset the database from scratch (deterministic — reruns yield identical
+row counts) without host Python, then restart the stack:
+
+```bash
+docker compose down -v
+./scripts/reset_data.sh
+docker compose up -d
+```
 - Without an OpenRouter key in `agent/.env`, both services still boot and
   `/health` keeps returning 200; the graph still runs end-to-end — the
   decider falls back to its deterministic heuristic transport and fill
