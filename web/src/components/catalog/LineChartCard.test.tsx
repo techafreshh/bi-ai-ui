@@ -5,6 +5,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { LineChartCard } from "./LineChartCard";
+import { SlotCopyProvider } from "./slotCopy";
 
 afterEach(() => {
   cleanup();
@@ -38,5 +39,36 @@ describe("LineChartCard", () => {
       />,
     );
     expect(screen.getByText("Aug 10: pricing change")).toBeTruthy();
+  });
+
+  it("falls back to the series title with no slot context", () => {
+    render(<LineChartCard series="arr_daily" range="2026-07-01..2026-09-30" />);
+    expect(screen.getByText("ARR, daily")).toBeTruthy();
+    expect(screen.queryByTestId("slot-skeleton")).toBeNull();
+  });
+
+  it("renders the slot skeleton while copy is pending", () => {
+    render(
+      <SlotCopyProvider value={{ slotCopy: {}, slotsPending: true }}>
+        <LineChartCard series="arr_daily" range="2026-07-01..2026-09-30" />
+      </SlotCopyProvider>,
+    );
+    expect(screen.getByTestId("slot-skeleton")).toBeTruthy();
+    expect(screen.queryByText("ARR, daily")).toBeNull();
+  });
+
+  it("renders streamed copy over the series title once filled", () => {
+    render(
+      <SlotCopyProvider
+        value={{
+          slotCopy: { "line_chart.title": "Daily ARR through Q3" },
+          slotsPending: false,
+        }}
+      >
+        <LineChartCard series="arr_daily" range="2026-07-01..2026-09-30" />
+      </SlotCopyProvider>,
+    );
+    expect(screen.getByText("Daily ARR through Q3")).toBeTruthy();
+    expect(screen.queryByTestId("slot-skeleton")).toBeNull();
   });
 });
