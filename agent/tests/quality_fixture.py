@@ -24,8 +24,9 @@ AGENT_DIR = Path(__file__).resolve().parents[1]
 # resolves for the verbatim SCHEMA_SQL import.
 sys.path.insert(0, str(AGENT_DIR / "scripts"))
 
-import db  # noqa: E402  (import must follow the sys.path bootstrap above)
 from generate_data import SCHEMA_SQL  # noqa: E402
+
+import db  # noqa: E402  (import must follow the sys.path bootstrap above)
 
 # (account_id, event_date, metric, units) insert columns, in schema order.
 _USAGE_INSERT = (

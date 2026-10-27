@@ -27,12 +27,14 @@ for env_path in (Path(__file__).parent / ".env", Path(".env")):
 else:
     load_dotenv()
 
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-from ag_ui_langgraph import add_langgraph_fastapi_endpoint
-from copilotkit import LangGraphAGUIAgent
+# E402 on the imports below is structural: load_dotenv() above must run
+# before any third-party/agent import so OPENROUTER_API_KEY/TEXT_MODEL are
+# visible at graph build time (module docstring) — never move them up.
+import uvicorn  # noqa: E402
+from ag_ui_langgraph import add_langgraph_fastapi_endpoint  # noqa: E402
+from copilotkit import LangGraphAGUIAgent  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 try:  # package-style entry (uvicorn agent.server:app from the repo root)
     from agent import db

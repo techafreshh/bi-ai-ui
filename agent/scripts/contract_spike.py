@@ -45,7 +45,7 @@ for _path in (str(REPO_ROOT), str(AGENT_DIR)):
 
 # Load agent/.env BEFORE importing the decision package — anything reading
 # OPENROUTER_API_KEY must see the file's values (mirrors server.py's order).
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402 — sys.path/env bootstrap above
 
 for _env_path in (AGENT_DIR / ".env", Path(".env")):
     if _env_path.is_file():

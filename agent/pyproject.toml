@@ -31,6 +31,10 @@ dependencies = [
   "pydantic>=2.0.0,<3.0.0",
   "pytest>=8.0.0,<9.0.0",
   "httpx>=0.27.0,<1.0.0",
+  # Pinned linter for issue #22's `ruff check` gate: `uv sync --frozen`
+  # installs it into the image/venv so `uv run ruff check .` works with no
+  # extra install step (and `uvx ruff` stays a fallback, never the gate).
+  "ruff>=0.8,<1.0",
 ]
 
 [tool.pytest.ini_options]
@@ -41,3 +45,13 @@ testpaths = ["tests"]
 # files, not test_* glob matches, so they are registered explicitly to stay
 # collected by a bare `pytest` run.
 python_files = ["test_*.py", "*_test.py", "golden_q3.py", "golden_dq.py"]
+
+[tool.ruff]
+# 100 columns matches the repo's existing comment/code width.
+line-length = 100
+
+[tool.ruff.lint]
+# Error-grade syntax/import hygiene only (E4/E7/E9/F) plus import sorting
+# (I): the codebase's long explanatory comments and naming are deliberate
+# and must not be reflowed by a formatter rule.
+select = ["E4", "E7", "E9", "F", "I"]

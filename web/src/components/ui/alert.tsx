@@ -166,7 +166,7 @@ export function Alert({
   );
 }
 
-export interface AlertIconProps extends ComponentProps<"span"> {}
+export type AlertIconProps = ComponentProps<"span">;
 
 export function AlertIcon({ className, children, ...props }: AlertIconProps) {
   const { variant, reduce } = useAlertContext("AlertIcon");
@@ -189,32 +189,32 @@ export function AlertIcon({ className, children, ...props }: AlertIconProps) {
   );
 }
 
-export interface AlertContentProps extends ComponentProps<"div"> {}
+export type AlertContentProps = ComponentProps<"div">;
 
 export function AlertContent({ className, ...props }: AlertContentProps) {
   return <div {...props} data-slot="alert-content" className={cn("min-w-0 flex-1 space-y-1", className)} />;
 }
 
-export interface AlertTitleProps extends ComponentProps<"div"> {}
+export type AlertTitleProps = ComponentProps<"div">;
 
 export function AlertTitle({ className, ...props }: AlertTitleProps) {
   return <div {...props} data-slot="alert-title" className={cn("font-medium leading-5 text-pretty", className)} />;
 }
 
-export interface AlertDescriptionProps extends ComponentProps<"div"> {}
+export type AlertDescriptionProps = ComponentProps<"div">;
 
 export function AlertDescription({ className, ...props }: AlertDescriptionProps) {
   return <div {...props} data-slot="alert-description" className={cn("text-pretty leading-relaxed text-muted-foreground [&_a]:underline [&_a]:underline-offset-4", className)} />;
 }
 
-export interface AlertActionProps extends ComponentProps<"div"> {}
+export type AlertActionProps = ComponentProps<"div">;
 
 /** Compose buttons or links here; this part never creates a nested button. */
 export function AlertAction({ className, ...props }: AlertActionProps) {
   return <div {...props} data-slot="alert-action" className={cn("flex flex-wrap items-center gap-2 pt-2", className)} />;
 }
 
-export interface AlertCloseProps extends Omit<HTMLMotionProps<"button">, "layout"> {}
+export type AlertCloseProps = Omit<HTMLMotionProps<"button">, "layout">;
 
 export function AlertClose({ className, children, onClick, ...props }: AlertCloseProps) {
   const { dismiss, reduce } = useAlertContext("AlertClose");

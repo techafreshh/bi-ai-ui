@@ -18,10 +18,10 @@ import json
 from datetime import date, timedelta
 
 import pytest
+from quality_fixture import build_fixture
 
 import db
 import quality
-from quality_fixture import build_fixture
 
 INJECTION = "2026-07-01'; DROP TABLE accounts;--"
 
