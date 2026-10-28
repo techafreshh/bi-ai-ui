@@ -66,6 +66,21 @@ _BY_ID: dict = {}
 _ACTIVE_ID = None
 
 
+def _postgres():
+    """Lazy Postgres backend (issue #80): the postgres_source module when
+    DATASOURCE_URL selects it, else None. A local import keeps this module
+    stdlib-only at import time (postgres_source is imported lazily, never
+    at module top) and driverless interpreters working."""
+    try:
+        try:  # package-style entry (import agent.datasets from the repo root)
+            from agent.data import postgres_source as module
+        except ModuleNotFoundError:  # script-style (import datasets from agent/)
+            from data import postgres_source as module  # type: ignore[no-redef]
+    except ImportError:
+        return None
+    return module if module.use_postgres() else None
+
+
 def _require_id_shape(dataset_id):
     """The sandbox id must be a non-empty `[A-Za-z0-9_-]+` string (no
     `../` escapes, no whitespace-only ids); anything else is ValueError
@@ -99,14 +114,20 @@ def set_active(dataset_id):
     touching the active pointer — when the id is unknown (neither
     registered nor backed by a `data/sandboxes/<id>.db` file) or malformed
     (non-string, empty, whitespace-only, bad characters), so the route can
-    answer 404 directly off the return value."""
+    answer 404 directly off the return value. The id "postgres" (issue
+    #80) resolves without touching _BY_ID when DATASOURCE_URL selects the
+    Postgres source — it names the live database, not a sandbox file."""
     if not isinstance(dataset_id, str) or not _DATASET_ID_RE.match(dataset_id):
         return False
+    global _ACTIVE_ID
+    if dataset_id == "postgres" and _postgres() is not None:
+        with _LOCK:
+            _ACTIVE_ID = "postgres"
+        return True
     with _LOCK:
         known = dataset_id in _BY_ID or (SANDBOX_DIR / f"{dataset_id}.db").is_file()
         if not known:
             return False
-        global _ACTIVE_ID
         _ACTIVE_ID = dataset_id
         return True
 
@@ -120,10 +141,14 @@ def get_active():
 def active_path():
     """Filesystem path of the active dataset's SQLite file, or None when
     no dataset is active. Registered ids resolve to their registered path;
-    scan-found orphans to `data/sandboxes/<id>.db`. Never creates files or
+    scan-found orphans to `data/sandboxes/<id>.db`. The Postgres source
+    (issue #80) has no file path — reads route via DATASOURCE_URL — so an
+    active "postgres" id resolves None here. Never creates files or
     directories; a missing file simply fails when a connection opens it."""
     active = get_active()
     if active is None:
+        return None
+    if active == "postgres":
         return None
     with _LOCK:
         entry = _BY_ID.get(active)
@@ -184,9 +209,23 @@ def info(dataset_id):
     """The list entry for one dataset (`{"id", "source", "tables",
     "rows", "data_end"}`), or None when the id is neither registered nor
     backed by a sandbox file. Unregistered files report source "upload";
-    a registered id whose file is missing profiles empty."""
+    a registered id whose file is missing profiles empty. The id
+    "postgres" (issue #80) profiles the live Postgres database read-only
+    through postgres_source when DATASOURCE_URL selects it, reporting
+    source "postgres"."""
     if not isinstance(dataset_id, str) or not _DATASET_ID_RE.match(dataset_id):
         return None
+    if dataset_id == "postgres":
+        backend = _postgres()
+        if backend is not None:
+            profile = backend.profile()
+            return {
+                "id": "postgres",
+                "source": "postgres",
+                "tables": profile["tables"],
+                "rows": profile["rows"],
+                "data_end": profile["data_end"],
+            }
     with _LOCK:
         entry = _BY_ID.get(dataset_id)
         registered = dict(entry) if entry is not None else None
@@ -206,7 +245,9 @@ def info(dataset_id):
 def list_datasets():
     """The `GET /data/datasets` body: `{"active_id", "datasets"}` with one
     `info()` entry per registered id plus every `data/sandboxes/*.db`
-    orphan (source "upload"), sorted by id. The scan is live per call, so
+    orphan (source "upload"), plus the live Postgres entry (source
+    "postgres", issue #80) when DATASOURCE_URL selects it — sorted by
+    id. The scan is live per call, so
     uploads appear with no registration step; files with unusable names
     are skipped. Never raises on an unreadable file or a missing
     directory — those entries profile empty."""
@@ -222,6 +263,8 @@ def list_datasets():
         for dataset_id in (registered_ids | stems)
         if isinstance(dataset_id, str) and _DATASET_ID_RE.match(dataset_id)
     }
+    if _postgres() is not None:
+        ids.add("postgres")
     entries = []
     for dataset_id in sorted(ids):
         entry = info(dataset_id)

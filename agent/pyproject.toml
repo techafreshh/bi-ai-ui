@@ -17,6 +17,10 @@ dependencies = [
   # Form-data parsing for POST /data/upload (issue #74): FastAPI's
   # UploadFile/Form require python-multipart at request time.
   "python-multipart>=0.0.18",
+  # Read-only Postgres client for the second source (issue #80):
+  # agent/data/postgres_source.py connects with default_transaction_read_only
+  # via libpq `options`, so every query rides a least-privilege session.
+  "psycopg[binary]>=3.1,<4.0",
   # 0.0.44, NOT 0.0.43 — matches the official CopilotKit langgraph-fastapi
   # starter's pin and the reason recorded there: ag-ui-langgraph 0.0.43's
   # clone(), which the fastapi endpoint calls on EVERY request, forwards

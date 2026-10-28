@@ -117,6 +117,23 @@ def _default_limit():
         return int(_SQL_ROW_LIMIT_FALLBACK)
     return value
 
+
+def _postgres():
+    """Lazy Postgres backend (issue #80): the postgres_source module when
+    DATASOURCE_URL selects it, else None — SQLite as today. A local import
+    keeps this module import-cycle-free (postgres_source duplicates the
+    validators instead of importing back) and driverless interpreters
+    working (a missing psycopg reads as "no Postgres", never an import
+    error); every public query below consults it before opening SQLite."""
+    try:
+        try:  # package-style entry (import agent.queries from the repo root)
+            from agent.data import postgres_source as module
+        except ModuleNotFoundError:  # script-style (import queries from agent/)
+            from data import postgres_source as module  # type: ignore[no-redef]
+    except ImportError:
+        return None
+    return module if module.use_postgres() else None
+
 # Net-new ARR in a window: every event type participates (cancel markers
 # carry arr_delta_cents = 0). Params: (start, end).
 _SQL_NET_NEW_ARR = """
@@ -384,6 +401,9 @@ def kpis(start, end):
     nrr (cohort ARR at `end` / at `start`, 0.0 on a zero base) and accounts
     (active count at `end`). Month-over-month net-new comparisons come from
     calling this once per month window."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.kpis(start, end)
     start, end = _require_window(start, end)
     conn = db.connect(readonly=True)
     try:
@@ -407,6 +427,9 @@ def gross_churned_arr(start, end):
     churn-time ARR of every cancelling account summed via _SQL_CHURNED_ARR
     (issue #77's file-only metric — no new SQL, the same template the
     churn rate's numerator uses, without the active-base division)."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.gross_churned_arr(start, end)
     start, end = _require_window(start, end)
     conn = db.connect(readonly=True)
     try:
@@ -422,6 +445,9 @@ def active_accounts_eom(end):
     """Active-account count at the window end day via _SQL_ACTIVE_DAY
     (issue #77's file-only metric — no new SQL, the same point-in-time
     template mrr/accounts read, count half only)."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.active_accounts_eom(end)
     day = _require_date(end, "end")
     conn = db.connect(readonly=True)
     try:
@@ -435,6 +461,9 @@ def arr_series(start, end):
     """One {"date", "arr"} row per calendar day from `start` to `end`
     inclusive, `arr` = total active ARR that day in dollars (0.0 on uncovered
     days), replayed from the events table in a single query."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.arr_series(start, end)
     start, end = _require_window(start, end)
     conn = db.connect(readonly=True)
     try:
@@ -449,6 +478,9 @@ def latest_event_date():
     string, or None on a DB with no events at all — the deterministic
     "data_end" anchor read_state resolves query windows against (the data's
     own horizon, never a wall clock). Read-only, like every query here."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.latest_event_date()
     conn = db.connect(readonly=True)
     try:
         return conn.execute(_SQL_LATEST_EVENT_DATE).fetchone()[0]
@@ -461,6 +493,9 @@ def churn_cohort(window, limit=None):
     one {"segment", "mrr", "tenure_months", "plan"} row per cancel event,
     ordered by (event_date, account_id), at most `limit` rows (>= 1; None
     reads the SQL_ROW_LIMIT default)."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.churn_cohort(window, limit=limit)
     start, end = _require_window_tuple(window)
     if limit is None:
         limit = _default_limit()
@@ -530,6 +565,9 @@ def churn_driver(window, data_end=None, limit=None):
     those visible rows (so the callout's claim never exceeds the table).
     `data_end` must be None or an ISO date; anything else is ValueError
     before any SQL runs."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.churn_driver(window, data_end=data_end, limit=limit)
     start, end = _require_window_tuple(window)
     if data_end is not None:
         data_end = _require_date(data_end, "data_end")
@@ -573,6 +611,9 @@ def churn_cohort_detail(window, segment=None, limit=None):
     portal-facing 'yes'/'no' spelling of churn_driver's repricing signature
     (an 'upgrade' in [window.start, cancel_date]), because table cells render
     via String(value) and a bare 0/1 would read as '0'."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.churn_cohort_detail(window, segment=segment, limit=limit)
     start, end = _require_window_tuple(window)
     if segment is not None:
         if not isinstance(segment, str) or not segment:
@@ -619,6 +660,11 @@ def churn_delta(end, metric="churn_rate", baseline_months=6):
         raise ValueError(
             f"metric {metric!r} is not whitelisted; "
             f"must be one of {_CHURN_METRICS}"
+        )
+    backend = _postgres()
+    if backend is not None:
+        return backend.churn_delta(
+            end, metric=metric, baseline_months=baseline_months
         )
     end_date = date.fromisoformat(_require_date(end, "end"))
     _require_int_at_least(baseline_months, "baseline_months", 1)

@@ -109,6 +109,22 @@ _NULL_WARN_SHARE = 0.001
 # Fixed result order — consumers index the list positionally.
 _CHECK_NAMES = ("freshness", "duplicates", "nulls")
 
+
+def _postgres():
+    """Lazy Postgres backend (issue #80): the postgres_source module when
+    DATASOURCE_URL selects it, else None — SQLite as today. A local import
+    keeps this module import-cycle-free (postgres_source duplicates the
+    validators instead of importing back) and driverless interpreters
+    working; both public checks below consult it before opening SQLite."""
+    try:
+        try:  # package-style entry (import agent.quality from the repo root)
+            from agent.data import postgres_source as module
+        except ModuleNotFoundError:  # script-style (import quality from agent/)
+            from data import postgres_source as module  # type: ignore[no-redef]
+    except ImportError:
+        return None
+    return module if module.use_postgres() else None
+
 # Latest event day across all three event tables: per-table MAX rides the
 # event_date indexes, the outer MAX folds the three candidates.
 _SQL_LATEST_EVENT_DATE = """
@@ -292,6 +308,9 @@ def run_checks(start=None, end=None, *, window=None):
     """Run the three data-quality checks and return them in the fixed order
     freshness, duplicates, nulls — [{name, status, score}], see the module
     docstring for the check semantics, thresholds and scope resolution."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.run_checks(start, end, window=window)
     if window is not None:
         if start is not None or end is not None:
             raise ValueError(
@@ -364,6 +383,9 @@ def recent_problem_scope(lookback_days=_PROBLEM_LOOKBACK_DAYS):
     ValueError on a non-positive or non-integer lookback_days (bools read
     as the ints they subclass, so they are rejected explicitly). Read-only
     over usage_events + accounts, like every query in this module."""
+    backend = _postgres()
+    if backend is not None:
+        return backend.recent_problem_scope(lookback_days)
     if (
         isinstance(lookback_days, bool)
         or not isinstance(lookback_days, int)
