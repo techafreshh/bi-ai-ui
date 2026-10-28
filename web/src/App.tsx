@@ -2,6 +2,7 @@ import { CopilotKitProvider } from "@copilotkit/react-core/v2";
 import { HttpAgent } from "@ag-ui/client";
 import "@copilotkit/react-core/v2/styles.css";
 import { DashboardCanvas } from "./components/DashboardCanvas";
+import { MetricPicker } from "./components/manual/MetricPicker";
 import { DatasetPicker } from "./components/datasets/DatasetPicker";
 import { DecisionDrawer } from "./components/DecisionDrawer";
 import { ThemeToggle } from "./components/ui/theme-toggle";
@@ -44,6 +45,7 @@ function AppShell() {
           sidebar chats on, so the drill-down lands on the visible thread. */}
       <InvestigateProvider agentId={AGENT_ID}>
         <main className="flex-1 p-8">
+          <MetricPicker />
           <DashboardCanvas
             onLoaded={() => setDatasetRefresh((count) => count + 1)}
           />
