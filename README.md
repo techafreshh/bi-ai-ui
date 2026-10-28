@@ -81,9 +81,9 @@ docker compose up
 
 - SPA: http://localhost:5173 — open it and chat in the sidebar ("ping").
 - Agent: http://localhost:8123 — `GET /health` returns exactly `{"status": "ok"}`.
-- The agent entrypoint generates `data/app.db` on first boot (skipped when
-  the file exists); `RESEED=1 docker compose up -d agent` forces a fresh
-  deterministic reseed even when it exists.
+- Boot is DB-less (issue #70): no dataset is generated at boot — the
+  canvas shows `No dataset loaded — upload CSV or load sample` until data
+  exists. Generate one manually with `./scripts/reset_data.sh` (below).
 
 Reset the database from scratch (deterministic — reruns yield identical
 row counts) without host Python, then restart the stack:
@@ -96,8 +96,7 @@ docker compose up -d
 - Without an OpenRouter key in `agent/.env`, both services still boot and
   `/health` keeps returning 200; the graph still runs end-to-end — the
   decider falls back to its deterministic heuristic transport and fill
-  writes KPI-grounded copy instead of model text (boot also self-seeds
-  `data/app.db` in the background when it is missing).
+  writes KPI-grounded copy instead of model text.
 
 ### Sample datasets: unplanted random data
 

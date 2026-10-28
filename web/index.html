@@ -10,7 +10,27 @@
     <title>bi-ai-ui</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Issue #70: static empty state so GET / contains the contract text
+           even before the client bundle mounts (probes read this file
+           verbatim); React replaces it on mount with the same EmptyState. -->
+      <main
+        style="
+          max-width: 72rem;
+          margin: 0 auto;
+          padding: 4rem 2rem;
+          text-align: center;
+          font-family: system-ui, sans-serif;
+        "
+      >
+        <p style="font-size: 1.125rem; font-weight: 500">
+          No dataset loaded — upload CSV or load sample
+        </p>
+        <p style="font-size: 0.875rem; opacity: 0.65">
+          Boot stays green with no dataset; add data to see the dashboard.
+        </p>
+      </main>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

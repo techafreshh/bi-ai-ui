@@ -27,6 +27,35 @@ def test_health_returns_exact_contract():
     assert response.json() == {"status": "ok"}
 
 
+def test_health_with_no_dataset_boot(monkeypatch, tmp_path):
+    """Issue #70: a missing data/app.db is the normal empty state — build a
+    fresh app with the DB default pointed at a nonexistent path and /health
+    still answers 200 with exactly {"status": "ok"} in under 2s, creating
+    no database file and starting no seeding work."""
+    import threading
+
+    missing = tmp_path / "missing.db"
+    monkeypatch.setattr(db, "DEFAULT_DB_PATH", missing)
+    t0 = time.monotonic()
+    fresh_app = server_module.create_app()
+    with TestClient(fresh_app) as boot_client:
+        response = boot_client.get("/health")
+    elapsed = time.monotonic() - t0
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "ok"}
+    assert elapsed < 2.0, f"/health took {elapsed:.2f}s with no dataset"
+    assert not missing.exists(), "boot must not create a database file"
+    assert not hasattr(server_module, "_ensure_seed_database"), (
+        "server must not seed at boot"
+    )
+    assert not hasattr(server_module, "_seed_database_worker"), (
+        "server must not seed at boot"
+    )
+    assert [
+        t for t in threading.enumerate() if t.name == "seed-database"
+    ] == [], "no seeding thread may start at boot"
+
+
 def test_cors_prefflight_allows_spa_origin():
     """Preflight from the Vite dev origin must be allowed on /copilotkit."""
     response = client.options(

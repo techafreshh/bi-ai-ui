@@ -24,8 +24,8 @@ function AppShell() {
         <div>
           <h1 className="text-lg font-semibold">bi-ai-ui</h1>
           <p className="text-sm text-muted-foreground">
-            Demo canvas — six catalog components on beUI cards, fixture-driven
-            until the agent streams a layout
+            Agent-driven canvas — empty until a dataset is loaded, then the
+            agent streams the layout
           </p>
         </div>
         <div className="flex items-center gap-2">

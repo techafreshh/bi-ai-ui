@@ -8,24 +8,22 @@ services:
     # env_file is the whole env passthrough (issue #19): every variable in
     # agent/.env reaches the container as-is — models, threshold, bind
     # address — and an edit applies via `docker compose up -d agent`
-    # (container recreate, no image rebuild). Deliberately no `environment:`
-    # block pinning key values: the only `environment:` entry is
-    # RESEED=${RESEED:-0}, which has no secret content and defaults to 0
-    # so normal boot only seeds when data/app.db is absent
-    # (RESEED=1 forces regeneration, the --reseed path).
+    # (container recreate, no image rebuild). Boot is DB-less by contract
+    # (issue #70): no seeding happens here — /health stays green with no
+    # dataset and read_state degrades instead of raising.
     # Long syntax with required: false so the agent still boots (and keeps
     # /health on 200) without agent/.env — only chat needs the key.
     env_file:
       - path: ./agent/.env
         required: false
     environment:
-      RESEED: ${RESEED:-0}
       # Browser origin allowed by CORS; must match where the SPA is served.
       SPA_ORIGIN: ${SPA_ORIGIN:-http://localhost:5173}
     # agent/db.py:DEFAULT_DB_PATH resolves from the file location, never
     # the cwd: parents[1]/data/app.db. In-container db.py is /app/db.py
-    # (WORKDIR /app), so the path is /data/app.db — this bind mount lands
-    # the seeded DB on the host's repo-root data/app.db.
+    # (WORKDIR /app), so the path is /data/app.db — this bind mount keeps
+    # a manually generated DB visible to the container; boot itself never
+    # creates one.
     volumes:
       - ./data:/data
     entrypoint: ["/app/docker-entrypoint.sh"]
