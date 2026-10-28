@@ -125,6 +125,14 @@ def test_postgres_parity_or_skip(sqlite_samples, outer_pg_url, monkeypatch):
     """Given DATASOURCE_URL, Postgres answers identically to SQLite on the
     same seed (latest_event_day, full KPI block, quality checks, problem
     scope); without it the branch skips with `SKIP: no DATASOURCE_URL`."""
+    # SQLite baselines FIRST, while DATASOURCE_URL is still cleared by the
+    # sqlite_samples fixture: restoring the URL below flips queries/quality
+    # to delegate to Postgres, so reading `lite_*` after the restore would
+    # assert Postgres against itself and a divergent template would pass.
+    lite_day = queries.latest_event_date()
+    lite_kpis = queries.kpis(*WINDOW)
+    lite_checks = quality.run_checks(*WINDOW)
+    lite_scope = quality.recent_problem_scope()
     _require_pg_url(outer_pg_url, monkeypatch)
     try:
         from data import postgres_source as pg
@@ -132,18 +140,16 @@ def test_postgres_parity_or_skip(sqlite_samples, outer_pg_url, monkeypatch):
         import postgres_source as pg  # type: ignore[no-redef]
     assert pg.use_postgres()
 
-    lite_day = queries.latest_event_date()
     pg_day = pg.latest_event_date()
     assert isinstance(pg_day, str) and ISO_DAY_RE.match(pg_day), pg_day
     assert pg_day == lite_day
 
-    lite_kpis = queries.kpis(*WINDOW)
     pg_kpis = pg.kpis(*WINDOW)
     assert pg_kpis["net_new_arr"] == lite_kpis["net_new_arr"]
     assert pg_kpis == lite_kpis
 
-    assert pg.run_checks(*WINDOW) == quality.run_checks(*WINDOW)
-    assert pg.recent_problem_scope() == quality.recent_problem_scope()
+    assert pg.run_checks(*WINDOW) == lite_checks
+    assert pg.recent_problem_scope() == lite_scope
 
 
 def test_postgres_read_only_or_skip(sqlite_samples, outer_pg_url, monkeypatch):
