@@ -1,4 +1,4 @@
-"""Compose hardening contract (issue #21): clean-clone boot and seed reset.
+"""Compose hardening contract (issues #21, #70): clean-clone boot, DB-less.
 
 Static, stdlib-only checks over the committed files — no daemon, no DB, no
 network — so they run anywhere `pytest agent/tests` runs:
@@ -6,13 +6,14 @@ network — so they run anywhere `pytest agent/tests` runs:
 - `docker-compose.yml` mounts the shared `./data` volume at the exact path
   `agent/db.py:DEFAULT_DB_PATH` resolves to in-container (`/data/app.db`),
   defines healthchecks on both services, gates `web` on the agent's health,
-  restarts unless-stopped, and passes `RESEED` through without pinning any
-  secret value.
+  restarts unless-stopped — and carries NO seed identity: no `RESEED`, no
+  generator invocation, so boot never creates a database (issue #70).
 - neither Dockerfile bakes a secret (`ARG`/`ENV` key lines), and compose
   carries no key literal either.
-- `agent/docker-entrypoint.sh` (the synchronous seed) and
-  `scripts/reset_data.sh` (the deterministic reset) exist, are executable,
-  and call the generator's `--db-path` interface rather than raw SQL.
+- `agent/docker-entrypoint.sh` exists, is executable, execs the server
+  command, and performs no seeding; `scripts/reset_data.sh` (the manual
+  deterministic reset) exists, is executable, and calls the generator's
+  `--db-path` interface rather than raw SQL.
 - `.gitignore` still keeps `.env` and the generated `data/` out of git.
 """
 
@@ -49,9 +50,14 @@ def test_shared_data_volume_matches_container_db_path():
     )
 
 
-def test_restart_policies_and_reseed_passthrough():
+def test_restart_policies_without_reseed():
     assert COMPOSE.count("unless-stopped") >= 2
-    assert "RESEED" in COMPOSE, "compose must pass RESEED through (--reseed)"
+    assert "RESEED" not in COMPOSE, (
+        "issue #70: boot is DB-less — compose must not reseed at boot"
+    )
+    assert "--db-path" not in COMPOSE, (
+        "issue #70: compose must not invoke the generator at boot"
+    )
 
 
 def test_no_image_build_embeds_any_secret():
@@ -64,14 +70,13 @@ def test_no_image_build_embeds_any_secret():
             ), f"{name}/Dockerfile bakes a secret: {line.strip()}"
 
 
-def test_agent_entrypoint_seed_script():
+def test_agent_entrypoint_boots_db_less():
     entrypoint = AGENT_DIR / "docker-entrypoint.sh"
     assert entrypoint.is_file()
     assert entrypoint.stat().st_mode & stat.S_IXUSR, "must be executable"
     text = entrypoint.read_text(encoding="utf-8")
-    assert "scripts/generate_data.py" in text
-    assert "--db-path" in text, "must use the generator's --db-path interface"
-    assert "/data/app.db" in text, "must target the mounted container DB path"
+    assert "--db-path" not in text, "must not invoke the generator at boot"
+    assert "RESEED" not in text, "must not reseed at boot"
     assert text.rstrip().endswith('exec "$@"'), "must exec the server command"
 
 

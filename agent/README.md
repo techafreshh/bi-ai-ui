@@ -4,10 +4,10 @@ LangGraph agent serving the AG-UI `/copilotkit` endpoint (see `server.py`).
 
 Mock data: `python scripts/generate_data.py` builds the deterministic seeded
 SQLite database at `../data/app.db` (gitignored) — schema documented in the
-script's docstring, connection helper in `db.py`. `server.py` also seeds it
-itself in a daemon thread at boot when the file is absent (a runtime
-checkout ships without it); `/health` never waits on the seed, and the
-graph degrades to placeholder copy while it runs.
+script's docstring, connection helper in `db.py`. Boot is DB-less by
+contract (issue #70): `server.py` never seeds — a runtime checkout ships
+without the file, `/health` stays green, and the graph degrades to
+placeholder copy until data exists.
 
 ## Agent graph (issue #10)
 

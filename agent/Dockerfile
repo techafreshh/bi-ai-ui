@@ -14,8 +14,8 @@ RUN uv sync --frozen --no-install-project
 
 COPY . .
 
-# Seed entrypoint (issue #21): synchronous generate_data.py run when
-# data/app.db is absent or RESEED=1, then execs CMD. No secrets here.
+# Boot entrypoint (issue #70): DB-less boot, no seeding — just execs CMD.
+# The generator stays available for manual runs. No secrets here.
 RUN chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 8123
