@@ -61,8 +61,8 @@ Security model mirrors queries.py: every SQL statement is a static
 module-level template; values are interpolated NEVER — they travel only as
 bound ? parameters, and caller-supplied date strings are canonicalized via
 date.fromisoformat (ValueError on anything else, injection payloads
-included) before any SQL runs. Connections come only from
-db.connect(readonly=True): this module never writes, mutates DDL, or even
+included) before any SQL runs. Connections come only from the `Source` protocol (`SqliteSource`,
+`agent/data/`): this module never writes, mutates DDL, or even
 opens a write handle. Stdlib only, mirroring db.py — importing this module
 never touches the agent's model dependencies.
 
@@ -76,9 +76,11 @@ deferred.
 from datetime import date, timedelta
 
 try:  # package-style entry (import agent.quality from the repo root)
-    from agent import db
+    from agent.data import SqliteSource
+    from agent.data.protocol import Source
 except ModuleNotFoundError:  # script-style entry (import quality from agent/)
-    import db
+    from data import SqliteSource
+    from data.protocol import Source
 
 # Default scope for the no-arg call: the N trailing days ending at the
 # latest observed event date. Trailing-window (not full-range) so freshness
@@ -301,7 +303,11 @@ def run_checks(start=None, end=None, *, window=None):
     if end is not None:
         end = _require_date(end, "end")
 
-    conn = db.connect(readonly=True)
+    # All reads go through the Source protocol — the connection below is
+    # a read-only SqliteSource handle, never a direct db.open — so a
+    # Postgres Source can slot in without touching this logic.
+    source: Source = SqliteSource()
+    conn = source.connect_ro()
     try:
         if end is None:
             # Anchor the default scope on the data's own latest day — never
@@ -366,7 +372,10 @@ def recent_problem_scope(lookback_days=_PROBLEM_LOOKBACK_DAYS):
         raise ValueError(
             f"lookback_days must be a positive integer, got {lookback_days!r}"
         )
-    conn = db.connect(readonly=True)
+    # Same protocol seam as run_checks: the scan reads through a
+    # read-only SqliteSource handle, never a direct db.open.
+    source: Source = SqliteSource()
+    conn = source.connect_ro()
     try:
         end = _latest_event_date(conn)
         if not end:
