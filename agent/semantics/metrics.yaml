@@ -1,0 +1,48 @@
+- name: net_new_arr
+  definition: Net-new ARR in the window summed over subscription events
+  grain: window
+  format: money
+  column: arr_delta_cents
+  owner: queries.kpis
+- name: mrr
+  definition: Active ARR at the window end divided by 12
+  grain: point
+  format: money
+  column: arr_cents
+  owner: queries.kpis
+- name: nrr
+  definition: Cohort ARR at the window end divided by cohort ARR at the window start
+  grain: window
+  format: ratio
+  column: arr_delta_cents
+  owner: queries.kpis
+- name: churn_rate
+  definition: Churned ARR in the window divided by active ARR at the window start
+  grain: window
+  format: ratio
+  column: arr_cents
+  owner: queries.churn_delta
+- name: active_accounts
+  definition: Active account count at the window end day
+  grain: point
+  format: count
+  column: account_id
+  owner: queries.kpis
+- name: data_quality
+  definition: Freshness duplicates and nulls check statuses over the window
+  grain: window
+  format: score
+  column: event_date
+  owner: quality.run_checks
+- name: gross_churned_arr
+  definition: Churned ARR in the window at churn-time plan values with no active-base division
+  grain: window
+  format: money
+  column: arr_cents
+  owner: queries.gross_churned_arr
+- name: active_accounts_eom
+  definition: Active account count at the window end day with no cohort restriction
+  grain: point
+  format: count
+  column: account_id
+  owner: queries.active_accounts_eom

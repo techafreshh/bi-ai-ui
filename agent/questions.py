@@ -277,6 +277,19 @@ def compact_snapshot_summary(snapshot):
         )
         if statuses:
             parts.append(f"data quality: {statuses}")
+    try:
+        try:  # package-style entry (import agent.questions from repo root)
+            from agent.semantics import load_metrics as _load_metrics
+        except ModuleNotFoundError:  # script-style (import questions from agent/)
+            from semantics import load_metrics as _load_metrics
+        defs = _load_metrics()
+    except Exception:  # noqa: BLE001 - registry trouble omits the segment
+        defs = []
+    if defs:
+        parts.append(
+            "metrics: "
+            + "; ".join(f"{row['name']}={row['definition']}" for row in defs)
+        )
     return "; ".join(parts) if parts else "no data snapshot available"
 
 
