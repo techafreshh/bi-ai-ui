@@ -16,6 +16,7 @@ import os
 import socket
 import sys
 import uuid
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -53,6 +54,74 @@ try:  # package-style entry (uvicorn agent.server:app from the repo root)
     from agent import datasets
 except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/)
     import datasets
+
+try:  # package-style entry (uvicorn agent.server:app from the repo root)
+    from agent import catalog, quality, queries, questions
+except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/)
+    import catalog
+    import quality
+    import queries
+    import questions
+
+# Manual-run composition (issue #81): hand-driven path through the same
+# renderer with no decider — picker values (metric + window + segment)
+# composed into a validated layout. Trendables render a line_chart,
+# cohorts a 50-capped data_table, data_quality a data_quality_card.
+_RUN_TRENDABLES = frozenset(
+    {
+        "net_new_arr",
+        "mrr",
+        "nrr",
+        "churn_rate",
+        "gross_churned_arr",
+        "active_accounts",
+        "active_accounts_eom",
+    }
+)
+_RUN_COHORTS = frozenset({"churn_rate", "gross_churned_arr"})
+_RUN_SEGMENTS = ("All", "Startup", "Growth", "Enterprise")
+_RUN_TABLE_COLUMNS = ["segment", "mrr", "tenure_months", "plan"]
+
+
+def _run_kpi_tiles(start, end, range_label):
+    """Four KPI tiles mirroring graph._kpi_tiles but decider-free: reads
+    queries.kpis directly for the window and the previous quarter, labels
+    embedding the ISO range verbatim, NRR delta absolute, the rest
+    relative (0.0 on a zero base)."""
+    kpis = queries.kpis(start, end)
+    previous = queries.kpis(*questions.previous_quarter((start,)))
+
+    def tile(label, key, absolute=False):
+        current = float(kpis[key])
+        prior = float(previous[key])
+        if absolute:
+            delta = current - prior
+        else:
+            delta = (current - prior) / prior if prior else 0.0
+        return {
+            "label": f"{label} ({range_label})",
+            "value": round(current, 2),
+            "delta": round(delta, 4),
+        }
+
+    tiles = [
+        tile("Net-new ARR", "net_new_arr"),
+        tile("MRR", "mrr"),
+        tile("NRR", "nrr", absolute=True),
+    ]
+    accounts = int(kpis["accounts"])
+    prior_accounts = int(previous["accounts"])
+    accounts_delta = (
+        (accounts - prior_accounts) / prior_accounts if prior_accounts else 0.0
+    )
+    tiles.append(
+        {
+            "label": f"Accounts ({range_label})",
+            "value": accounts,
+            "delta": round(accounts_delta, 4),
+        }
+    )
+    return tiles
 
 logger = logging.getLogger("bi-ai-ui.agent")
 
@@ -213,6 +282,190 @@ def create_app() -> FastAPI:
     @app.get("/data/datasets")
     async def list_datasets():
         return datasets.list_datasets()
+
+    # Deterministic hand-driven path through the same renderer (issue
+    # #81): picker values (metric + window + segment) composed server-side
+    # into a validated layout with no decider. Validation order is
+    # missing params, then the YAML-compiled metric whitelist, then the
+    # ISO window, then the segment allowlist, then the active-dataset
+    # probe — every failure is 400 {"error"} before any I/O. Success is
+    # a validated A2UILayout dict (kpi_row first, line_chart for
+    # trendables, 50-capped data_table for cohorts, data_quality_card for
+    # data_quality, insight_text last) with deterministic slotCopy and
+    # never a decisions key.
+    @app.get("/data/run")
+    async def run(
+        metric: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        segment: str | None = "All",
+    ):
+        if metric is None or not str(metric).strip():
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing required query parameter: metric"},
+            )
+        if start is None or not str(start).strip():
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing required query parameter: start"},
+            )
+        if end is None or not str(end).strip():
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing required query parameter: end"},
+            )
+        metric = str(metric).strip()
+        start = str(start).strip()
+        end = str(end).strip()
+        if metric not in queries._METRIC_FUNCS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"unknown metric {metric!r}; must be one of "
+                        f"{sorted(queries._METRIC_FUNCS)}"
+                    )
+                },
+            )
+        try:
+            canon_start = date.fromisoformat(start).isoformat()
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": f"window start is not a valid ISO date: {start!r}"
+                },
+            )
+        try:
+            canon_end = date.fromisoformat(end).isoformat()
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": f"window end is not a valid ISO date: {end!r}"
+                },
+            )
+        if canon_start > canon_end:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"window start {canon_start} is after "
+                        f"window end {canon_end}"
+                    )
+                },
+            )
+        start, end = canon_start, canon_end
+        seg = segment if isinstance(segment, str) else "All"
+        seg = seg.strip() if isinstance(seg, str) else "All"
+        if seg not in _RUN_SEGMENTS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"unknown segment {segment!r}; must be one of "
+                        f"{list(_RUN_SEGMENTS)}"
+                    )
+                },
+            )
+        segment = seg
+        try:
+            queries.latest_event_date()
+        except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+            return JSONResponse(
+                status_code=400, content={"error": "no active dataset"}
+            )
+        try:
+            queries.metric_value(metric, start, end)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400, content={"error": str(exc)}
+            )
+        except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+            return JSONResponse(
+                status_code=400, content={"error": "no active dataset"}
+            )
+        range_label = f"{start}..{end}"
+        try:
+            tiles = _run_kpi_tiles(start, end, range_label)
+            items: list[dict] = [
+                {"type": "kpi_row", "props": {"kpis": tiles}}
+            ]
+            if metric in _RUN_TRENDABLES:
+                items.append(
+                    {
+                        "type": "line_chart",
+                        "props": {"series": metric, "range": range_label},
+                    }
+                )
+            if metric in _RUN_COHORTS:
+                seg_filter = None if segment == "All" else segment
+                detail_rows = queries.churn_cohort_detail(
+                    (start, end), segment=seg_filter, limit=50
+                )[:50]
+                table_rows = [
+                    {
+                        "segment": row["segment"],
+                        "mrr": row["mrr"],
+                        "tenure_months": row["tenure_months"],
+                        "plan": row["plan"],
+                    }
+                    for row in detail_rows
+                ]
+                items.append(
+                    {
+                        "type": "data_table",
+                        "props": {
+                            "columns": list(_RUN_TABLE_COLUMNS),
+                            "rows": table_rows,
+                        },
+                    }
+                )
+            if metric == "data_quality":
+                items.append(
+                    {
+                        "type": "data_quality_card",
+                        "props": {
+                            "checks": quality.run_checks(window=(start, end))
+                        },
+                    }
+                )
+            items.append(
+                {
+                    "type": "insight_text",
+                    "props": {
+                        "title": f"{metric} insights \u2014 {range_label}",
+                        "body": "",
+                    },
+                }
+            )
+            slot_copy: dict[str, str] = {
+                "kpis.title": f"{metric} {range_label} ({segment})",
+                "insight_text.body": (
+                    f"{metric} from {start} to {end} "
+                    f"(segment {segment}). KPIs and trend are "
+                    f"window-scoped; the cohort table is filtered to "
+                    f"{segment}."
+                ),
+                "summary": f"{metric} {range_label} segment {segment}.",
+            }
+            if metric in _RUN_TRENDABLES:
+                slot_copy["line_chart.title"] = (
+                    f"{metric} trend ({range_label})"
+                )
+            layout = {
+                "v": 1,
+                "layout": "grid",
+                "items": items,
+                "slotCopy": slot_copy,
+            }
+        except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+            return JSONResponse(
+                status_code=400, content={"error": "no active dataset"}
+            )
+        validated = catalog.A2UILayout.model_validate(layout)
+        return validated.model_dump()
 
     # Server-side sample miniature (issue #76): assembles ONE sandbox DB
     # from all four SAMPLES_DIR/*.csv files, registers it with source
