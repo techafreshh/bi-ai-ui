@@ -85,6 +85,34 @@ def test_registry_example_and_code_reads_are_exactly_equal():
     assert set(_registry()) == set(_example_lines()) == _code_env_names()
 
 
+def test_issue_79_vars_are_pinned_three_ways():
+    """Issue #79: the six datasource/guard vars are registered in
+    config.py, documented in agent/.env.example AND read literally by
+    agent code — named explicitly so a silent drop of any one fails."""
+    pinned = {
+        "DB_PATH",
+        "DATASOURCE_URL",
+        "DATASOURCE_RO",
+        "UPLOAD_MAX_MB",
+        "SQL_ROW_LIMIT",
+        "SQL_TIMEOUT_S",
+    }
+    assert pinned <= set(_registry()), pinned - set(_registry())
+    assert pinned <= set(_example_lines()), pinned - set(_example_lines())
+    assert pinned <= _code_env_names(), pinned - _code_env_names()
+
+
+def test_example_spa_origin_lists_tauri():
+    """Issue #79: the SPA_ORIGIN example is a comma list whose members
+    include the Vite dev origin and tauri://localhost, equal to the
+    registered default verbatim."""
+    raw = _example_lines()["SPA_ORIGIN"]
+    assert raw == _registry()["SPA_ORIGIN"].default
+    origins = [part.strip() for part in raw.split(",") if part.strip()]
+    assert "http://localhost:5173" in origins, raw
+    assert "tauri://localhost" in origins, raw
+
+
 def test_example_values_equal_registered_defaults():
     """Copying agent/.env.example to agent/.env is behavior-neutral: every
     active value equals the registry's documented default, and the numeric
@@ -113,6 +141,17 @@ def test_registry_defaults_match_the_owning_modules():
     import graph as agent_graph
 
     assert defaults["TEXT_MODEL"] == agent_graph.DEFAULT_TEXT_MODEL
+
+    import db as agent_db
+    import queries as agent_queries
+    import server as agent_server
+
+    assert defaults["DATASOURCE_URL"] == agent_db._DATASOURCE_URL_DEFAULT
+    assert defaults["DATASOURCE_RO"] == agent_db._DATASOURCE_RO_DEFAULT
+    assert defaults["DATASOURCE_RO"] == agent_server._DATASOURCE_RO_FALLBACK
+    assert defaults["SQL_ROW_LIMIT"] == agent_queries._SQL_ROW_LIMIT_FALLBACK
+    assert defaults["SQL_TIMEOUT_S"] == agent_db._SQL_TIMEOUT_S_DEFAULT
+    assert defaults["SPA_ORIGIN"] == agent_server._SPA_ORIGIN_FALLBACK
 
 
 def test_readme_environment_table_lists_every_variable():

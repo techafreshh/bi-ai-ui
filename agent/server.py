@@ -14,6 +14,7 @@ import argparse
 import logging
 import os
 import socket
+import sys
 import uuid
 from pathlib import Path
 
@@ -56,9 +57,55 @@ except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/
 logger = logging.getLogger("bi-ai-ui.agent")
 
 AGENT_NAME = "bi_agent"
-# The SPA's browser-visible origin. Overridable so a remapped Docker stack
-# (e.g. web on :12308) passes the matching CORS origin without code edits.
-SPA_ORIGIN = os.getenv("SPA_ORIGIN") or "http://localhost:5173"
+# Fallback default for SPA_ORIGIN (issue #79), mirrored from config.py's
+# registry row: the comma-separated browser-origin allowlist for the
+# agent's CORS middleware. The Tauri shell origin rides alongside the Vite
+# dev origin so the desktop build passes preflight without code edits;
+# a remapped Docker stack (e.g. web on :12308) overrides via the env.
+_SPA_ORIGIN_FALLBACK = "http://localhost:5173,tauri://localhost"
+# Fallback default for DATASOURCE_RO (issue #79), mirrored from
+# config.py's registry row: read-only unless the operator opts out.
+_DATASOURCE_RO_FALLBACK = "1"
+
+# Spellings that count as read-only for DATASOURCE_RO (case-insensitive,
+# whitespace-stripped); anything else — including "0" or empty — means
+# the datasource may be writable, and the server refuses to boot.
+_READONLY_VALUES = ("1", "true", "yes")
+
+
+def _spa_origins():
+    """CORS allowlist from SPA_ORIGIN: comma-split, stripped, empties
+    dropped, order preserved. Empty or unset falls back to the default
+    list instead of locking the SPA out."""
+    raw = os.getenv("SPA_ORIGIN", _SPA_ORIGIN_FALLBACK)
+    if not raw or not raw.strip():
+        raw = _SPA_ORIGIN_FALLBACK
+    origins = [part.strip() for part in raw.split(",") if part.strip()]
+    if not origins:
+        origins = [part.strip() for part in _SPA_ORIGIN_FALLBACK.split(",")]
+    return origins
+
+
+def _datasource_is_readonly():
+    """True when DATASOURCE_RO holds a read-only spelling (issue #79)."""
+    raw = os.getenv("DATASOURCE_RO", _DATASOURCE_RO_FALLBACK)
+    return (raw or "").strip().lower() in _READONLY_VALUES
+
+
+def _require_readonly_datasource():
+    """Fail-fast read-only guard (issue #79): with DATASOURCE_RO set to
+    anything but a read-only spelling the process exits non-zero with a
+    read-only message on stderr before binding or listening."""
+    if _datasource_is_readonly():
+        return
+    raw = os.getenv("DATASOURCE_RO", _DATASOURCE_RO_FALLBACK)
+    print(
+        f"refusing to boot: DATASOURCE_RO={raw!r} is not read-only — "
+        "the agent serves read-only queries and must not start with a "
+        "writable datasource",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 # Issue contract pins 8123 as the default; --host/--port flags and the
 # AGENT_[HOST|PORT]/PORT env vars exist so harnesses and platform deploys can
 # remap the bind without code changes.
@@ -91,13 +138,15 @@ def _upload_max_bytes():
         return int(float(_UPLOAD_MAX_MB_FALLBACK) * 1024 * 1024)
 
 def create_app() -> FastAPI:
+    _require_readonly_datasource()
     app = FastAPI(title="bi-ai-ui agent")
 
     # PRD v1.1: the SPA talks to this server directly from the browser, so
-    # the Vite dev origin must be allowed on /copilotkit (incl. preflight).
+    # the allowlist origins must be allowed on /copilotkit (incl.
+    # preflight) — the Vite dev origin first, then the Tauri shell origin.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[SPA_ORIGIN],
+        allow_origins=_spa_origins(),
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -289,6 +338,7 @@ def _open_listeners(host: str, port: int) -> list[socket.socket] | None:
 
 def main() -> None:
     """Run the uvicorn server (blocks until the loop exits)."""
+    _require_readonly_datasource()
     parser = argparse.ArgumentParser(description="bi-ai-ui agent server")
     parser.add_argument(
         "--host",

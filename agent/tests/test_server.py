@@ -86,6 +86,51 @@ def test_cors_prefflight_allows_spa_origin():
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
+def test_cors_preflight_allows_tauri_origin():
+    """Issue #79: the SPA_ORIGIN allowlist also passes the Tauri shell
+    origin, while a foreign origin is not echoed back."""
+    response = client.options(
+        "/copilotkit",
+        headers={
+            "Origin": "tauri://localhost",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "tauri://localhost"
+
+    foreign = client.options(
+        "/copilotkit",
+        headers={
+            "Origin": "https://evil.example.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert (
+        foreign.headers.get("access-control-allow-origin")
+        != "https://evil.example.com"
+    )
+
+
+def test_datasource_ro_zero_refuses_to_boot():
+    """Issue #79: DATASOURCE_RO=0 exits non-zero with read-only on stderr
+    before binding — the fail-fast guard, probed as a real subprocess."""
+    result = subprocess.run(
+        [sys.executable, "server.py"],
+        cwd=AGENT_DIR,
+        env={**os.environ, "DATASOURCE_RO": "0"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode != 0, result.stdout[-2000:]
+    assert "read-only" in result.stderr, (
+        result.stderr[-2000:] + result.stdout[-2000:]
+    )
+
+
 def test_no_key_still_boots_and_serves_health(monkeypatch):
     """No OPENROUTER_API_KEY in env: app import and /health still work.
 

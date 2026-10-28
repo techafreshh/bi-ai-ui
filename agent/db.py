@@ -33,6 +33,57 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "app.db"
 # `<id>.db` here); same from-`__file__` anchoring as DEFAULT_DB_PATH.
 SANDBOX_DIR = Path(__file__).resolve().parents[1] / "data" / "sandboxes"
 
+# Fallback defaults for the issue #79 datasource vars, mirrored from
+# agent/config.py's registry rows (the env-contract tests pin them equal).
+# DATASOURCE_URL names an alternate source (empty = local SQLite path
+# resolution as today); DATASOURCE_RO guards the boot (agent/server.py
+# refuses to start on any non-read-only spelling); SQL_TIMEOUT_S bounds
+# the sqlite connect timeout.
+_DATASOURCE_URL_DEFAULT = ""
+_DATASOURCE_RO_DEFAULT = "1"
+_SQL_TIMEOUT_S_DEFAULT = "5.0"
+
+# Spellings that count as read-only for DATASOURCE_RO (case-insensitive,
+# whitespace-stripped); anything else — including "0" or empty — means
+# "not read-only" and server.py refuses to boot.
+_READONLY_VALUES = ("1", "true", "yes")
+
+
+def get_datasource_url():
+    """Alternate datasource URL from DATASOURCE_URL (issue #79).
+
+    Empty (the default) means local SQLite path resolution as today; a
+    non-empty value is validated for non-blankness only — Postgres
+    wiring is out of scope, SQLite remains the engine."""
+    return os.getenv("DATASOURCE_URL", _DATASOURCE_URL_DEFAULT)
+
+
+def is_readonly():
+    """True when DATASOURCE_RO holds a read-only spelling (issue #79).
+
+    Unset boots fine (the default is read-only); server.py — not this
+    library helper — owns the fail-fast refusal, so tests keep
+    connecting freely."""
+    raw = os.getenv("DATASOURCE_RO", _DATASOURCE_RO_DEFAULT)
+    return (raw or "").strip().lower() in _READONLY_VALUES
+
+
+def _sql_timeout_s():
+    """sqlite connect timeout in seconds from SQL_TIMEOUT_S (issue #79).
+
+    Non-numeric, empty or non-positive values fall back to the default
+    instead of failing the connection."""
+    raw = os.getenv("SQL_TIMEOUT_S", _SQL_TIMEOUT_S_DEFAULT)
+    if not raw or not raw.strip():
+        return float(_SQL_TIMEOUT_S_DEFAULT)
+    try:
+        value = float(raw.strip())
+    except (TypeError, ValueError):
+        return float(_SQL_TIMEOUT_S_DEFAULT)
+    if not value > 0:
+        return float(_SQL_TIMEOUT_S_DEFAULT)
+    return value
+
 
 def _registry_active_path():
     """Active sandbox path from the issue #75 in-memory registry (None when
@@ -82,7 +133,7 @@ def connect(db_path=None, *, readonly=False):
 
     Returns a `sqlite3.Connection` whose rows are `sqlite3.Row` (name-based
     access), with `PRAGMA foreign_keys = ON` (SQLite disables FK enforcement
-    per connection by default) and a 10s busy timeout so concurrent readers
+    per connection by default) and the SQL_TIMEOUT_S busy timeout so concurrent readers
     during a generation run queue instead of erroring.
     """
     if db_path is None:
@@ -91,9 +142,11 @@ def connect(db_path=None, *, readonly=False):
             db_path = get_active_path()
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     if readonly:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10.0)
+        conn = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, timeout=_sql_timeout_s()
+        )
     else:
-        conn = sqlite3.connect(str(path), timeout=10.0)
+        conn = sqlite3.connect(str(path), timeout=_sql_timeout_s())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

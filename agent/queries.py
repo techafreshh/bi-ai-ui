@@ -73,6 +73,7 @@ agent's model dependencies.
 """
 
 import calendar
+import os
 from datetime import date
 
 try:  # package-style entry (import agent.queries from the repo root)
@@ -95,6 +96,26 @@ _CHURN_METRICS = ("churn_rate",)
 
 # Average month length in days (365.25 / 12) for tenure in months.
 _DAYS_PER_MONTH = 30.4375
+
+# Fallback default for SQL_ROW_LIMIT (issue #79), mirrored from
+# agent/config.py's registry row: the row cap applied when a caller leaves
+# `limit` unset. Non-numeric, empty or out-of-range values fall back to
+# this instead of 500ing the query.
+_SQL_ROW_LIMIT_FALLBACK = "50"
+
+
+def _default_limit():
+    """Row cap from SQL_ROW_LIMIT (issue #79), clamped to >= 1."""
+    raw = os.getenv("SQL_ROW_LIMIT", _SQL_ROW_LIMIT_FALLBACK)
+    if not raw or not raw.strip():
+        return int(_SQL_ROW_LIMIT_FALLBACK)
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return int(_SQL_ROW_LIMIT_FALLBACK)
+    if value < 1:
+        return int(_SQL_ROW_LIMIT_FALLBACK)
+    return value
 
 # Net-new ARR in a window: every event type participates (cancel markers
 # carry arr_delta_cents = 0). Params: (start, end).
@@ -435,11 +456,14 @@ def latest_event_date():
         conn.close()
 
 
-def churn_cohort(window, limit=50):
+def churn_cohort(window, limit=None):
     """Churn cohort rows for the inclusive `window` (a (start, end) pair):
     one {"segment", "mrr", "tenure_months", "plan"} row per cancel event,
-    ordered by (event_date, account_id), at most `limit` rows (>= 1)."""
+    ordered by (event_date, account_id), at most `limit` rows (>= 1; None
+    reads the SQL_ROW_LIMIT default)."""
     start, end = _require_window_tuple(window)
+    if limit is None:
+        limit = _default_limit()
     _require_int_at_least(limit, "limit", 1)
     conn = db.connect(readonly=True)
     try:
@@ -484,7 +508,7 @@ def _dominant_segment(rows):
     return segment, round(count / len(rows), 4)
 
 
-def churn_driver(window, data_end=None, limit=50):
+def churn_driver(window, data_end=None, limit=None):
     """Churn-spike facts for the variance callout and the Investigate
     drill-down (issue #16) over `window` (a (start, end) pair of ISO dates).
 
@@ -500,7 +524,8 @@ def churn_driver(window, data_end=None, limit=50):
 
     Returns {"cohort_start", "cohort_end", "spiked", "cancelled",
     "repriced", "rows", "dominant_segment", "dominant_share"}: rows reused
-    from churn_cohort (at most `limit` >= 1), counts from aggregate SQL over
+    from churn_cohort (at most `limit` >= 1; None reads the SQL_ROW_LIMIT
+    default), counts from aggregate SQL over
     the cohort window, and the dominant segment/share computed over exactly
     those visible rows (so the callout's claim never exceeds the table).
     `data_end` must be None or an ISO date; anything else is ValueError
@@ -508,6 +533,8 @@ def churn_driver(window, data_end=None, limit=50):
     start, end = _require_window_tuple(window)
     if data_end is not None:
         data_end = _require_date(data_end, "data_end")
+    if limit is None:
+        limit = _default_limit()
     _require_int_at_least(limit, "limit", 1)
 
     conn = db.connect(readonly=True)
@@ -535,13 +562,14 @@ def churn_driver(window, data_end=None, limit=50):
     }
 
 
-def churn_cohort_detail(window, segment=None, limit=50):
+def churn_cohort_detail(window, segment=None, limit=None):
     """Row-level churn cohort for the Investigate drill-down (issue #16):
     one {"segment", "plan", "mrr", "tenure_months", "cancelled_on",
     "repriced"} dict per cancel event in the inclusive `window` (a (start,
     end) pair of ISO dates), ordered by (event_date, account_id), at most
-    `limit` rows (>= 1). `segment` None means every segment; a value is
-    matched exactly (parameterized — never interpolated). `repriced` is the
+    `limit` rows (>= 1; None reads the SQL_ROW_LIMIT default). `segment`
+    None means every segment; a value is matched exactly (parameterized —
+    never interpolated). `repriced` is the
     portal-facing 'yes'/'no' spelling of churn_driver's repricing signature
     (an 'upgrade' in [window.start, cancel_date]), because table cells render
     via String(value) and a bare 0/1 would read as '0'."""
@@ -549,6 +577,8 @@ def churn_cohort_detail(window, segment=None, limit=50):
     if segment is not None:
         if not isinstance(segment, str) or not segment:
             raise ValueError("segment must be None or a non-empty string")
+    if limit is None:
+        limit = _default_limit()
     _require_int_at_least(limit, "limit", 1)
     conn = db.connect(readonly=True)
     try:
