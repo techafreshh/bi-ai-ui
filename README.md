@@ -124,6 +124,39 @@ instead of the demo script's "August". Two things differ on this profile:
   duplicates:fail …) — its planted-shape probes are expected to MISS on a
   random-profile DB; switch back with a bare `./scripts/reset_data.sh`.
 
+### Full-data reproducer
+
+Full data is reproducible without committing blobs: `agent/scripts/generate_data.py`
+(the flags mirror the module docstring verbatim — money is INTEGER cents, dates
+are TEXT `YYYY-MM-DD`) builds a full-scale DB (~2.9M rows) at any `--db-path`:
+
+```bash
+python agent/scripts/generate_data.py --db-path ./data/sandboxes/<id>.db --profile seeded
+python agent/scripts/generate_data.py --db-path ./data/sandboxes/<id>.db --profile random --seed 7
+```
+
+- `--profile seeded` (default) plants the three choreographed demo invariants —
+  the Q3-2026 net-new-ARR growth ramp, the Aug-10-2026 pricing-change churn
+  spike (40 Growth-segment repriced-then-cancelled accounts), and the Sept 8–21
+  Startup-only ingest bug (exact duplicates plus NULL units). `--seed` is
+  accepted but ignored here, so the output stays byte-identical to the demo
+  contract.
+- `--profile random` plants none of the choreographed shapes: organic growth,
+  a seed-picked churn spike (month/segment/count) and a seed-picked 14-day
+  ingest bug. `--seed N` picks the shapes — the same seed always rebuilds the
+  identical dataset, different seeds draw different ones; the printed summary
+  names the drawn spike/bug windows.
+- The script creates missing parent dirs (`data/sandboxes/` included) and
+  unlinks an existing target first, so reruns over the same path are idempotent
+  instead of appending duplicate rows. `data/` stays gitignored — sandbox DBs
+  are never committed.
+- Sandbox handoff: the file the generator wrote becomes the active dataset via
+  `DB_PATH=./data/sandboxes/<id>.db` (resolved by `agent/db.py`, empty/unset
+  falls back to `data/app.db`).
+- Release-asset flow: full-scale CSVs/SQLite ship as release assets only, never
+  as committed blobs — the repo stays lean, `samples/` plus this generator
+  reproduce everything (see the `samples/README.md` parity note).
+
 ## Environment
 
 ```bash
