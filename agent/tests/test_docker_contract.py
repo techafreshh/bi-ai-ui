@@ -1,4 +1,4 @@
-"""Compose hardening contract (issues #21, #70): clean-clone boot, DB-less.
+"""Compose hardening contract (issues #21, #70, #71): clean-clone boot, DB-less.
 
 Static, stdlib-only checks over the committed files — no daemon, no DB, no
 network — so they run anywhere `pytest agent/tests` runs:
@@ -55,6 +55,12 @@ def test_restart_policies_without_reseed():
     assert "RESEED" not in COMPOSE, (
         "issue #70: boot is DB-less — compose must not reseed at boot"
     )
+    assert "generate_data" not in COMPOSE, (
+        "issue #71: compose must not invoke the generator at boot"
+    )
+    assert "wait_for_seed" not in COMPOSE, (
+        "issue #71: compose must not seed-wait at boot"
+    )
     assert "--db-path" not in COMPOSE, (
         "issue #70: compose must not invoke the generator at boot"
     )
@@ -75,6 +81,8 @@ def test_agent_entrypoint_boots_db_less():
     assert entrypoint.is_file()
     assert entrypoint.stat().st_mode & stat.S_IXUSR, "must be executable"
     text = entrypoint.read_text(encoding="utf-8")
+    assert "generate_data" not in text, "must not invoke the generator at boot"
+    assert "wait_for_seed" not in text, "must not seed-wait at boot"
     assert "--db-path" not in text, "must not invoke the generator at boot"
     assert "RESEED" not in text, "must not reseed at boot"
     assert text.rstrip().endswith('exec "$@"'), "must exec the server command"

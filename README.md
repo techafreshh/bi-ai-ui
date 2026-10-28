@@ -235,12 +235,11 @@ confirms the compose-provided value without rebuilding the image.
 The PRD §11 checklist is executable — no manual clicking required:
 
 ```bash
-docker compose up -d            # boot agent :8123 + web :5173 (self-seeds data/app.db)
-python3 scripts/verify_demo.py  # 15 stdlib-only HTTP/state probes, exit 0 on green
+docker compose up -d            # boot agent :8123 + web :5173 (empty by default — no dataset is generated at boot)
+python3 scripts/verify_demo.py  # 15 stdlib-only HTTP/state probes, exit 0 on green (needs a loaded DB: ./scripts/reset_data.sh first)
 ```
 
-The probe suite waits for the stack, re-runs the Q3 query until the
-background seed lands, then checks the Q3 path (`kpi_row` + `line_chart`
+The probe suite waits for the stack, runs the Q3 query once, then checks the Q3 path (`kpi_row` + `line_chart`
 over `2026-07-01..2026-09-30` + non-empty reply), the churn path
 (`variance_callout` with pricing cause + 38–50-row cohort table), the DQ
 path (`duplicates:fail, nulls:fail, freshness:ok` + `data_problem` p>0.7),

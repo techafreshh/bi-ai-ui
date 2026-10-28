@@ -21,9 +21,8 @@ services:
       SPA_ORIGIN: ${SPA_ORIGIN:-http://localhost:5173}
     # agent/db.py:DEFAULT_DB_PATH resolves from the file location, never
     # the cwd: parents[1]/data/app.db. In-container db.py is /app/db.py
-    # (WORKDIR /app), so the path is /data/app.db — this bind mount keeps
-    # a manually generated DB visible to the container; boot itself never
-    # creates one.
+    # (WORKDIR /app), so the path is /data/app.db — this bind mount is for
+    # future sandbox datasets only (issue #71); boot itself never creates one.
     volumes:
       - ./data:/data
     entrypoint: ["/app/docker-entrypoint.sh"]
