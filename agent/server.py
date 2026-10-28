@@ -34,7 +34,7 @@ else:
 import uvicorn  # noqa: E402
 from ag_ui_langgraph import add_langgraph_fastapi_endpoint  # noqa: E402
 from copilotkit import LangGraphAGUIAgent  # noqa: E402
-from fastapi import FastAPI, File, Form, UploadFile  # noqa: E402
+from fastapi import FastAPI, File, Form, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 
@@ -47,6 +47,11 @@ try:  # package-style entry (uvicorn agent.server:app from the repo root)
     from agent.sandbox import ALLOWED_TABLES, load_bytes
 except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/)
     from sandbox import ALLOWED_TABLES, load_bytes
+
+try:  # package-style entry (uvicorn agent.server:app from the repo root)
+    from agent import datasets
+except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/)
+    import datasets
 
 logger = logging.getLogger("bi-ai-ui.agent")
 
@@ -151,12 +156,38 @@ def create_app() -> FastAPI:
             "data_end": data_end,
         }
 
-    # Honest-empty dataset contract (issue #71): no registry yet (#70
-    # fills this in) — with no active dataset report null + empty list
-    # so empty is an explicit state instead of zeros-as-data.
+    # Single-active world-switch (issue #75): the registry behind
+    # datasets.list_datasets() scans data/sandboxes/*.db live per request,
+    # so uploads (issue #74) appear with no registration step and the
+    # honest-empty contract (issue #71) holds — with no active dataset the
+    # body is still exactly {"active_id": None, "datasets": []}.
     @app.get("/data/datasets")
-    async def datasets():
-        return {"active_id": None, "datasets": []}
+    async def list_datasets():
+        return datasets.list_datasets()
+
+    # Explicit activation (issue #75): a known id moves the process-wide
+    # active path every later db.connect() resolves, so all subsequent
+    # queries read only the newly active file. Unknown, missing or
+    # non-string ids are 404 {"error"} — never 400/422 — and leave the
+    # active pointer untouched (set_active returns False without mutating
+    # on anything it does not know).
+    @app.post("/data/active")
+    async def activate_dataset(request: Request):
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - any unparseable body is 404
+            body = None
+        dataset_id = body.get("id") if isinstance(body, dict) else None
+        if not isinstance(dataset_id, str) or not dataset_id.strip():
+            return JSONResponse(
+                status_code=404, content={"error": "missing dataset id"}
+            )
+        if datasets.set_active(dataset_id):
+            return {"active_id": dataset_id}
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"unknown dataset {dataset_id!r}"},
+        )
 
     add_langgraph_fastapi_endpoint(
         app=app,
