@@ -199,4 +199,15 @@ ENV_VARS: tuple[EnvVar, ...] = (
         required=False,
         purpose="Fallback bind port when AGENT_PORT is unset or empty.",
     ),
+    EnvVar(
+        name="DB_PATH",
+        default="",
+        required=False,
+        purpose=(
+            "Path of the active per-dataset sandbox SQLite file "
+            "(issue #73; agent/sandbox.py writes data/sandboxes/<id>.db). "
+            "Empty or unset means no active DB; agent/db.py then falls "
+            "back to data/app.db."
+        ),
+    ),
 )

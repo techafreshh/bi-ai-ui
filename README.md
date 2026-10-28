@@ -151,6 +151,7 @@ Set your OpenRouter key (create one at https://openrouter.ai/keys) in
 | `HOST` | no (default `0.0.0.0`) | Fallback bind host when `AGENT_HOST` is unset or empty |
 | `AGENT_PORT` | no (default `8123`) | Bind port for `python server.py` (the `--port` default), read ahead of `PORT` |
 | `PORT` | no (default `8123`) | Fallback bind port when `AGENT_PORT` is unset or empty |
+| `DB_PATH` | no (default empty) | Path of the active per-dataset sandbox SQLite file (`data/sandboxes/<id>.db`, written by `agent/sandbox.py`); empty or unset means no active DB and `agent/db.py` falls back to `data/app.db` |
 
 Every variable above exists in [`agent/.env.example`](agent/.env.example)
 with its default as the value, so copying the file is behavior-neutral.
