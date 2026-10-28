@@ -65,6 +65,8 @@ from typing_extensions import Annotated, NotRequired, TypedDict
 
 try:  # package-style entry (import agent.graph from the repo root)
     from agent import catalog, quality, queries, questions
+    from agent.data import SqliteSource
+    from agent.data.protocol import Source
     from agent.decision import client as decision_client
     from agent.decision.heuristic import HeuristicTransport, classify
 except ModuleNotFoundError:  # script-style entry (tests, server.py from agent/)
@@ -72,6 +74,8 @@ except ModuleNotFoundError:  # script-style entry (tests, server.py from agent/)
     import quality
     import queries
     import questions
+    from data import SqliteSource
+    from data.protocol import Source
     from decision import client as decision_client
     from decision.heuristic import HeuristicTransport, classify
 
@@ -302,7 +306,12 @@ async def read_state(state: AgentState) -> dict:
     data_end = None
     window = None
     try:
-        data_end = queries.latest_event_date()
+        # The data_end anchor resolves through the Source protocol — never
+        # a direct DB read — so a Postgres Source slots in with no graph
+        # change; an unreadable source degrades (data_end stays None)
+        # instead of raising.
+        source: Source = SqliteSource()
+        data_end = source.latest_event_day()
         window = questions.resolve_window(user_text, data_end=data_end)
     except Exception as exc:  # noqa: BLE001 - DB problems degrade, never raise
         logger.error("read_state: data read failed (%s); degrading snapshot", exc)
