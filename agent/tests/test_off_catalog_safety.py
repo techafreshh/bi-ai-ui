@@ -13,9 +13,11 @@ test posts to the real `/copilotkit` app (server.py) 100 times.
 import json
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 
 import catalog
+import datasets
 import graph as agent_graph
 import questions as questions_module
 from decision.client import DecisionClient, MockTransport
@@ -29,6 +31,23 @@ from tests.test_graph import (
 
 # The seeded DB itself is the suite-wide shared seed: tests/conftest.py
 # provides the `seeded_db` fixture these tests consume by name.
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _active_seed(seeded_db):
+    """Issue #85 rescoped the graph to the single-active dataset: activate
+    the module seed so SSE runs (including the hammer's /copilotkit posts)
+    read it; save/restore keeps the id out of later modules."""
+    saved_by_id = dict(datasets._BY_ID)
+    saved_active = datasets._ACTIVE_ID
+    datasets.register("seeded", seeded_db, "sample")
+    assert datasets.set_active("seeded")
+    try:
+        yield
+    finally:
+        datasets._BY_ID.clear()
+        datasets._BY_ID.update(saved_by_id)
+        datasets._ACTIVE_ID = saved_active
 
 
 # --- Acceptance clause 1 (+3): the dragon renders only the insight fallback ---

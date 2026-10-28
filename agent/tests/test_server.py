@@ -179,6 +179,7 @@ def test_graph_completes_without_api_key(monkeypatch):
     run needs nothing."""
     import pathlib
 
+    import datasets
     import graph as graph_module
     from decision.client import DecisionClient
     from decision.heuristic import HeuristicTransport
@@ -186,6 +187,10 @@ def test_graph_completes_without_api_key(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     original_db_path = db.DEFAULT_DB_PATH
     db.DEFAULT_DB_PATH = pathlib.Path(tempfile.mkdtemp()) / "missing.db"
+    saved_by_id = dict(datasets._BY_ID)
+    saved_active = datasets._ACTIVE_ID
+    datasets.register("missing-probe", db.DEFAULT_DB_PATH, "upload")
+    assert datasets.set_active("missing-probe")
     try:
         monkeypatch.setattr(
             graph_module,
@@ -200,6 +205,9 @@ def test_graph_completes_without_api_key(monkeypatch):
         )
     finally:
         db.DEFAULT_DB_PATH = original_db_path
+        datasets._BY_ID.clear()
+        datasets._BY_ID.update(saved_by_id)
+        datasets._ACTIVE_ID = saved_active
     assert result["status"] == "done"
     assert result["decisions"], "decisions must still be stamped without a key"
     assert result["a2ui"]["slotCopy"], "fill must write deterministic copy"
