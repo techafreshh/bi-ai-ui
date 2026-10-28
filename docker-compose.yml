@@ -18,7 +18,7 @@ services:
         required: false
     environment:
       # Browser origin allowed by CORS; must match where the SPA is served.
-      SPA_ORIGIN: ${SPA_ORIGIN:-http://localhost:5173}
+      SPA_ORIGIN: ${SPA_ORIGIN:-http://localhost:5173,tauri://localhost}
       # Issue #76: the server-side sample miniature reads its CSVs from
       # this container path (read-only mount below); host/CI keeps the
       # __file__-anchored repo-root samples/ default by leaving it unset.

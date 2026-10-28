@@ -49,10 +49,14 @@ _DECISION_FALLBACK_MODELS_DEFAULT = (
 )
 _DECISION_THRESHOLD_DEFAULT = "0.6"
 _DECISION_TIMEOUT_S_DEFAULT = "8.0"
-_SPA_ORIGIN_DEFAULT = "http://localhost:5173"
+_SPA_ORIGIN_DEFAULT = "http://localhost:5173,tauri://localhost"
 _AGENT_HOST_DEFAULT = "0.0.0.0"
 _AGENT_PORT_DEFAULT = "8123"
 _UPLOAD_MAX_MB_DEFAULT = "25"
+_DATASOURCE_URL_DEFAULT = ""
+_DATASOURCE_RO_DEFAULT = "1"
+_SQL_ROW_LIMIT_DEFAULT = "50"
+_SQL_TIMEOUT_S_DEFAULT = "5.0"
 _SAMPLES_DIR_DEFAULT = ""
 
 ENV_VARS: tuple[EnvVar, ...] = (
@@ -166,9 +170,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
         default=_SPA_ORIGIN_DEFAULT,
         required=False,
         purpose=(
-            "Browser origin allowed by the agent's CORS middleware. Set it "
-            "when the SPA is served from a different origin than the "
-            "native-dev default (e.g. a remapped Docker web port)."
+            "Comma-separated browser-origin allowlist for the agent's "
+            "CORS middleware (order preserved; the Tauri shell origin "
+            "rides alongside the Vite dev default). Set it when the SPA "
+            "is served from a different origin than the native-dev "
+            "default (e.g. a remapped Docker web port)."
         ),
     ),
     EnvVar(
@@ -223,6 +229,50 @@ ENV_VARS: tuple[EnvVar, ...] = (
             "to the default."
         ),
     ),
+    EnvVar(
+        name="DATASOURCE_URL",
+            default=_DATASOURCE_URL_DEFAULT,
+            required=False,
+            purpose=(
+                "Alternate datasource URL (issue #79; empty = local "
+                "SQLite path resolution as today). A non-empty value is "
+                "validated for non-blankness only — Postgres wiring is "
+                "out of scope, SQLite remains the engine."
+            ),
+        ),
+        EnvVar(
+            name="DATASOURCE_RO",
+            default=_DATASOURCE_RO_DEFAULT,
+            required=False,
+            purpose=(
+                "Read-only guard (issue #79): only 1/true/yes "
+                "(case-insensitive) boot; anything else — including 0 "
+                "or empty — makes agent/server.py refuse to start with "
+                "a read-only error on stderr before binding."
+            ),
+        ),
+        EnvVar(
+            name="SQL_ROW_LIMIT",
+            default=_SQL_ROW_LIMIT_DEFAULT,
+            required=False,
+            purpose=(
+                "Default row cap for the churn cohort/driver queries "
+                "(issue #79; agent/queries.py applies it when a caller "
+                "leaves limit unset). Non-numeric, empty or "
+                "out-of-range values fall back to the default."
+            ),
+        ),
+        EnvVar(
+            name="SQL_TIMEOUT_S",
+            default=_SQL_TIMEOUT_S_DEFAULT,
+            required=False,
+            purpose=(
+                "sqlite connect timeout in seconds (issue #79; "
+                "agent/db.py applies it to every connection). "
+                "Non-numeric, empty or non-positive values fall back "
+                "to the default."
+            ),
+        ),
     EnvVar(
         name="SAMPLES_DIR",
         default=_SAMPLES_DIR_DEFAULT,

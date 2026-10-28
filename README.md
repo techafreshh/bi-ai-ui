@@ -146,13 +146,17 @@ Set your OpenRouter key (create one at https://openrouter.ai/keys) in
 | `DECISION_FALLBACK_MODELS` | no (default `openai/gpt-6-luna,anthropic/claude-haiku-5.5`) | Comma-separated chat-completions fallback chain (json_schema structured output); members must be chat models |
 | `DECISION_THRESHOLD` | no (default `0.6`) | Min probability for `above_threshold` flagging on decision answers; below it the component is cut from the layout |
 | `DECISION_TIMEOUT_S` | no (default `8.0`) | Per-request timeout in seconds for both decision transports |
-| `SPA_ORIGIN` | no (default `http://localhost:5173`) | Browser origin allowed by the agent's CORS middleware; set it when the SPA is served from a different origin (e.g. a remapped Docker web port) |
+| `SPA_ORIGIN` | no (default `http://localhost:5173,tauri://localhost`) | Comma-separated browser-origin allowlist for the agent's CORS middleware; the Tauri shell origin rides alongside the Vite dev origin — set it when the SPA is served from a different origin (e.g. a remapped Docker web port) |
 | `AGENT_HOST` | no (default `0.0.0.0`) | Bind host for `python server.py` (the `--host` default), read ahead of `HOST` |
 | `HOST` | no (default `0.0.0.0`) | Fallback bind host when `AGENT_HOST` is unset or empty |
 | `AGENT_PORT` | no (default `8123`) | Bind port for `python server.py` (the `--port` default), read ahead of `PORT` |
 | `PORT` | no (default `8123`) | Fallback bind port when `AGENT_PORT` is unset or empty |
 | `DB_PATH` | no (default empty) | Path of the active per-dataset sandbox SQLite file (`data/sandboxes/<id>.db`, written by `agent/sandbox.py`); empty or unset means no active DB and `agent/db.py` falls back to `data/app.db` |
+| `DATASOURCE_URL` | no (default empty) | Alternate datasource URL; empty means local SQLite path resolution as today (Postgres wiring is out of scope, SQLite stays the engine) |
+| `DATASOURCE_RO` | no (default `1`) | Read-only guard: only `1`/`true`/`yes` boot; anything else refuses to start with a read-only error on stderr before binding |
 | `UPLOAD_MAX_MB` | no (default `25`) | Decimal megabytes capping `POST /data/upload` CSV bodies; larger files are rejected with 400 before any write; non-numeric or empty values fall back to the default |
+| `SQL_ROW_LIMIT` | no (default `50`) | Default row cap for the churn cohort/driver queries; non-numeric, empty or out-of-range values fall back to the default |
+| `SQL_TIMEOUT_S` | no (default `5.0`) | sqlite connect timeout in seconds; non-numeric, empty or non-positive values fall back to the default |
 | `SAMPLES_DIR` | no (default empty) | Directory `POST /data/sample` reads its four CSVs from (docker-compose mounts repo-root `samples/` at `/samples`); empty or unset means the repo-root `samples/` dir anchored from `agent/server.py` |
 
 Every variable above exists in [`agent/.env.example`](agent/.env.example)
