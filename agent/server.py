@@ -13,7 +13,9 @@ runs at boot — with no active dataset GET /data/datasets reports
 import argparse
 import logging
 import os
+import re
 import socket
+import sqlite3
 import sys
 import uuid
 from datetime import date
@@ -51,9 +53,10 @@ except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/
     from sandbox import ALLOWED_TABLES, _parse_text, load_bytes, load_tables
 
 try:  # package-style entry (uvicorn agent.server:app from the repo root)
-    from agent import datasets
+    from agent import datasets, db
 except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/)
     import datasets
+    import db
 
 try:  # package-style entry (uvicorn agent.server:app from the repo root)
     from agent import catalog, quality, queries, questions
@@ -190,6 +193,38 @@ _NO_KEY_LOG = (
 # per request (never import time) so tests and operators can retune it via
 # the environment without reimporting the server.
 _UPLOAD_MAX_MB_FALLBACK = "25"
+
+
+# Fallback default for SQL_ROW_LIMIT (issue #83), mirrored from
+# config.py's registry row: the row cap capping POST /data/query results.
+# Read per request (never import time) so tests and operators can retune it
+# via the environment without reimporting the server.
+_SQL_ROW_LIMIT_FALLBACK = "50"
+
+# Blocked-write keywords for POST /data/query (issue #83): any word-boundary
+# hit means the statement can mutate or probe the sandbox, so the route
+# answers 400 {"error": "blocked ..."} before opening a connection.
+_QUERY_BLOCKED_RE = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|PRAGMA)\b",
+    re.IGNORECASE,
+)
+
+
+def _query_limit():
+    """Row cap for POST /data/query from SQL_ROW_LIMIT (issue #83).
+
+    Non-numeric, empty or <1 values fall back to the default instead of
+    500ing the query (the same fallback queries._default_limit applies)."""
+    raw = os.getenv("SQL_ROW_LIMIT", _SQL_ROW_LIMIT_FALLBACK)
+    if not raw or not raw.strip():
+        return int(_SQL_ROW_LIMIT_FALLBACK)
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return int(_SQL_ROW_LIMIT_FALLBACK)
+    if value < 1:
+        return int(_SQL_ROW_LIMIT_FALLBACK)
+    return value
 
 
 def _upload_max_bytes():
@@ -543,6 +578,67 @@ def create_app() -> FastAPI:
             status_code=404,
             content={"error": f"unknown dataset {dataset_id!r}"},
         )
+
+    # Guarded SQL escape hatch (issue #83): exactly one leading SELECT,
+    # capped rows, read-only connection. Sequential validation mirrors the
+    # /data/run style — body shape, single-statement (`;`), leading
+    # SELECT, blocked keywords — each a 400 {"error"} before any I/O.
+    # Success runs wrapped as SELECT * FROM (<sql>) LIMIT <cap> over
+    # db.connect_ro() (mode=ro URI + SQL_TIMEOUT_S) and returns 200
+    # {"columns", "rows"}; every sqlite failure maps to 400 {"error"}.
+    @app.post("/data/query")
+    async def run_query(request: Request):
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - any unparseable body is 400
+            body = None
+        sql = body.get("sql") if isinstance(body, dict) else None
+        if not isinstance(sql, str) or not sql.strip():
+            return JSONResponse(
+                status_code=400, content={"error": "missing sql"}
+            )
+        if ";" in sql:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "single statement only: multiple statements blocked"},
+            )
+        if not re.match(r"(?is)^\s*select\b", sql):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "blocked: only leading SELECT statements are allowed"},
+            )
+        if _QUERY_BLOCKED_RE.search(sql):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "blocked: statement contains a blocked keyword"},
+            )
+        cap = _query_limit()
+        try:
+            conn = db.connect_ro()
+        except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+            return JSONResponse(
+                status_code=400, content={"error": "no active dataset"}
+            )
+        try:
+            cur = conn.execute(f"SELECT * FROM ({sql}) LIMIT {cap}")
+            columns = [d[0] for d in cur.description] if cur.description else []
+            rows = [list(r) for r in cur.fetchall()]
+        except sqlite3.Error as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": str(exc) or "query failed"},
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": str(exc) or "query failed"},
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - close must never mask a body
+                pass
+        return {"columns": columns, "rows": rows}
 
     add_langgraph_fastapi_endpoint(
         app=app,
