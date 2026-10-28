@@ -14,6 +14,9 @@ dependencies = [
   "fastapi>=0.115.5,<1.0.0",
   "uvicorn>=0.29.0,<1.0.0",
   "python-dotenv>=1.0.0,<2.0.0",
+  # Form-data parsing for POST /data/upload (issue #74): FastAPI's
+  # UploadFile/Form require python-multipart at request time.
+  "python-multipart>=0.0.18",
   # 0.0.44, NOT 0.0.43 — matches the official CopilotKit langgraph-fastapi
   # starter's pin and the reason recorded there: ag-ui-langgraph 0.0.43's
   # clone(), which the fastapi endpoint calls on EVERY request, forwards
