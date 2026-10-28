@@ -1,35 +1,70 @@
 {
   "meta": {
-    "captured_at": "2026-10-26T13:12:34+00:00",
-    "model": "~perplexity/pplx-decider-flash-latest",
-    "url": "http://127.0.0.1:8949/decisions",
-    "source": "custom-endpoint",
+    "captured_at": "2026-10-27T19:45:40+00:00",
+    "model": "perplexity/pplx-decider-flash-v1.2",
+    "endpoint": "https://openrouter.ai/api/alpha/decisions",
+    "source": "live-openrouter",
     "questions": [
       "which-components",
-      "is-data-problem"
+      "is-data-problem",
+      "dq-confidence"
     ],
-    "elapsed_s": 0.095,
-    "note": "captured via scripts/contract_spike.py against a local PRD-s10 stub endpoint: no OPENROUTER_API_KEY exists on the implementer box; re-run the spike unmodified against live OpenRouter to refresh"
+    "elapsed_s": 2.023,
+    "note": "alpha decisions batch: multi-select catalog (6 noul) + noul + score (2026-10-27)"
   },
   "response": {
-    "answers": [
-      {
-        "id": "which-components",
-        "type": "choice",
-        "probabilities": {
-          "kpi_row": 0.43,
-          "line_chart": 0.25,
-          "variance_callout": 0.12,
-          "data_table": 0.1,
-          "data_quality_card": 0.06,
-          "insight_text": 0.04
-        }
-      },
-      {
-        "id": "is-data-problem",
+    "model": "perplexity/pplx-decider-flash-v1.2-20261016",
+    "answers": {
+      "which-components::kpi_row": {
         "type": "noul",
-        "probabilities": 0.12
+        "noul": 0.34025051502475107
+      },
+      "which-components::line_chart": {
+        "type": "noul",
+        "noul": 0.3503981532390288
+      },
+      "which-components::variance_callout": {
+        "type": "noul",
+        "noul": 0.29300486339295273
+      },
+      "which-components::data_table": {
+        "type": "noul",
+        "noul": 0.5626205634235711
+      },
+      "which-components::data_quality_card": {
+        "type": "noul",
+        "noul": 0.298499955441305
+      },
+      "which-components::insight_text": {
+        "type": "noul",
+        "noul": 0.45561275438908366
+      },
+      "is-data-problem": {
+        "type": "noul",
+        "noul": 0.4091507068951789
+      },
+      "dq-confidence": {
+        "type": "score",
+        "score": 1.4763651549116037,
+        "legend": {
+          "0": "not confident",
+          "1": "somewhat confident",
+          "2": "very confident"
+        },
+        "probabilities": {
+          "0": 0.15652554493195464,
+          "1": 0.210583755224487,
+          "2": 0.6328906998435584
+        },
+        "confidence": 0.4763651549116037
       }
-    ]
+    },
+    "usage": {
+      "input_tokens": 868,
+      "output_tokens": 8,
+      "cost": 8.68e-06
+    },
+    "id": "gen-dec-1793130340-JcEx2XEsGKZ62GNEtFob",
+    "provider": "Perplexity"
   }
 }

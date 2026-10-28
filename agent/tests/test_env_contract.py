@@ -108,6 +108,7 @@ def test_registry_defaults_match_the_owning_modules():
     assert defaults["DECISION_THRESHOLD"] == str(decision.client.DEFAULT_THRESHOLD)
     assert defaults["DECISION_TIMEOUT_S"] == str(decision.client.DEFAULT_DECISION_TIMEOUT_S)
     assert defaults["OPENROUTER_BASE_URL"] == decision.client.OPENROUTER_BASE_URL
+    assert defaults["DECISION_ENDPOINT"] == decision.client.DEFAULT_DECISION_ENDPOINT
 
     import graph as agent_graph
 

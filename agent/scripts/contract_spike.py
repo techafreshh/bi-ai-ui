@@ -1,8 +1,8 @@
 """Live contract spike for the OpenRouter decisions-modality endpoint (issue #9).
 
-POSTs the PRD §10 batch wire format — two canonical questions (the 6-option
-catalog choice per PRD §7 plus one noul) and a state snapshot — to the
-decisions endpoint for DECISION_MODEL and records the raw response body to
+POSTs the alpha batch wire format — three canonical questions (the 6-option
+catalog choice per PRD §7, one noul, and one score) and a state snapshot —
+to DECISION_ENDPOINT for DECISION_MODEL and records the raw response body to
 `agent/tests/contract_snapshot.json` as {"meta", "response"} so
 DecisionsModalityTransport.parse can be pinned against the real response
 shape in tests (issue acceptance clause 1).
@@ -23,10 +23,10 @@ Usage (from the repo root or agent/):
   python agent/scripts/contract_spike.py [--transport both] [--output PATH]
       [--state-json '{"arr_trend": "up"}']
 
-Reads OPENROUTER_API_KEY / DECISION_MODEL / OPENROUTER_BASE_URL /
-DECISION_TIMEOUT_S from the environment after loading agent/.env. Without a
-key the transports fail at construction with the agent's standard message —
-nothing is written.
+Reads OPENROUTER_API_KEY / DECISION_MODEL / DECISION_ENDPOINT /
+OPENROUTER_BASE_URL / DECISION_TIMEOUT_S from the environment after loading
+agent/.env. Without a key the transports fail at construction with the
+agent's standard message — nothing is written.
 """
 
 import argparse
@@ -60,16 +60,18 @@ try:  # package-style entry (import agent.decision from the repo root)
         ChoiceQuestion,
         DecisionsModalityTransport,
         NoulQuestion,
+        ScoreQuestion,
     )
-    from agent.decision.client import OPENROUTER_BASE_URL as DEFAULT_BASE_URL
+    from agent.decision.client import DEFAULT_DECISION_ENDPOINT
 except ModuleNotFoundError:  # script-style entry (import decision from agent/)
     from decision import (
         ChatStructuredTransport,
         ChoiceQuestion,
         DecisionsModalityTransport,
         NoulQuestion,
+        ScoreQuestion,
     )
-    from decision.client import OPENROUTER_BASE_URL as DEFAULT_BASE_URL
+    from decision.client import DEFAULT_DECISION_ENDPOINT
 
 # PRD §7 catalog — the choice question's options are exactly these 6 types.
 CATALOG_OPTIONS = [
@@ -84,19 +86,27 @@ DEFAULT_OUTPUT = AGENT_DIR / "tests" / "contract_snapshot.json"
 
 
 def canonical_questions():
-    """The spike's two-question set: the PRD §7 'which components' choice
-    over the full 6-type catalog, plus one noul (yes/no) question."""
+    """The spike's three-question set: the PRD §7 'which components' choice
+    over the full 6-type catalog, one noul (yes/no), and one score."""
     return [
         ChoiceQuestion(
             id="which-components",
             prompt="Which catalog components does this query need?",
             options=CATALOG_OPTIONS,
+            multi=True,
         ),
         NoulQuestion(
             id="is-data-problem",
             prompt=(
                 "Does the evidence point to a data problem (nulls, gaps, "
                 "duplicates) rather than a business trend?"
+            ),
+        ),
+        ScoreQuestion(
+            id="dq-confidence",
+            prompt=(
+                "Rate how confident you are that the data for this window "
+                "is clean, from 'not confident' to 'very confident'."
             ),
         ),
     ]
@@ -157,10 +167,10 @@ def _write_snapshot(path, transport, questions, elapsed_s, note=""):
     meta = {
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "model": transport.model,
-        "url": f"{transport.base_url}/decisions",
+        "endpoint": transport.endpoint,
         "source": (
             "live-openrouter"
-            if transport.base_url == DEFAULT_BASE_URL
+            if transport.endpoint == DEFAULT_DECISION_ENDPOINT
             else "custom-endpoint"
         ),
         "questions": [q.id for q in questions],
@@ -176,7 +186,7 @@ def _write_snapshot(path, transport, questions, elapsed_s, note=""):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Live contract spike: POST the PRD §10 batch wire format to the "
+            "Live contract spike: POST the alpha batch wire format to the "
             "OpenRouter decisions-modality endpoint and record the raw "
             "response shape to agent/tests/contract_snapshot.json."
         )
@@ -217,37 +227,43 @@ def main(argv=None):
         return 1
 
     async def run():
-        decisions_mapping, decisions_elapsed = await _probe(transport, questions)
-        _print_table(
-            "decisions-modality transport "
-            f"({transport.model} @ {transport.base_url}/decisions)",
-            questions,
-            decisions_mapping,
-            decisions_elapsed,
-            error=None if decisions_mapping else decisions_elapsed,
-        )
-        outcome = {
-            "decisions_ok": decisions_mapping is not None,
-            "decisions_elapsed": decisions_elapsed if decisions_mapping else None,
-            "chat_ok": None,
-        }
-        if args.transport in ("chat", "both"):
-            chat_mapping, chat_elapsed = await _probe(chat, questions)
-            _print_table(
-                f"chat fallback chain ({', '.join(chat.models)})",
-                questions,
-                chat_mapping,
-                chat_elapsed if chat_mapping else None,
-                error=None if chat_mapping else chat_elapsed,
+        try:
+            decisions_mapping, decisions_elapsed = await _probe(
+                transport, questions
             )
-            outcome["chat_ok"] = chat_mapping is not None
-        return outcome
+            _print_table(
+                "decisions-modality transport "
+                f"({transport.model} @ {transport.endpoint})",
+                questions,
+                decisions_mapping,
+                decisions_elapsed,
+                error=None if decisions_mapping else decisions_elapsed,
+            )
+            outcome = {
+                "decisions_ok": decisions_mapping is not None,
+                "decisions_elapsed": (
+                    decisions_elapsed if decisions_mapping else None
+                ),
+                "chat_ok": None,
+            }
+            if args.transport in ("chat", "both"):
+                chat_mapping, chat_elapsed = await _probe(chat, questions)
+                _print_table(
+                    f"chat fallback chain ({', '.join(chat.models)})",
+                    questions,
+                    chat_mapping,
+                    chat_elapsed if chat_mapping else None,
+                    error=None if chat_mapping else chat_elapsed,
+                )
+                outcome["chat_ok"] = chat_mapping is not None
+            return outcome
+        finally:
+            # Owned httpx clients are bound to this loop; close them here,
+            # not in a second asyncio.run() (which raises Event loop closed).
+            await transport.aclose()
+            await chat.aclose()
 
-    try:
-        outcome = asyncio.run(run())
-    finally:
-        asyncio.run(transport.aclose())
-        asyncio.run(chat.aclose())
+    outcome = asyncio.run(run())
 
     exit_code = 0
     if outcome["decisions_ok"]:

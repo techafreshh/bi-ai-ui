@@ -46,7 +46,9 @@ except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/
 logger = logging.getLogger("bi-ai-ui.agent")
 
 AGENT_NAME = "bi_agent"
-SPA_ORIGIN = "http://localhost:5173"
+# The SPA's browser-visible origin. Overridable so a remapped Docker stack
+# (e.g. web on :12308) passes the matching CORS origin without code edits.
+SPA_ORIGIN = os.getenv("SPA_ORIGIN") or "http://localhost:5173"
 # Issue contract pins 8123 as the default; --host/--port flags and the
 # AGENT_[HOST|PORT]/PORT env vars exist so harnesses and platform deploys can
 # remap the bind without code changes.

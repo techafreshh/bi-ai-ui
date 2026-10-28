@@ -52,16 +52,26 @@ class ChoiceQuestion:
     be total (>= 2), duplicate-free and empty-string-free or construction
     fails: a duplicate or blank option would make argmax consumers read an
     ambiguous or unanswerable key.
+
+    multi=True marks a co-occurring selection (the catalog question): the
+    options are independently testable, not mutually exclusive, so the
+    alpha transport fans them out into one noul per option and folds the
+    answers back into a single choice-shaped probability map. Chat-style
+    transports still see one choice question with a per-option probability
+    instruction.
     """
 
     id: str
     prompt: str
     options: list[str] | tuple[str, ...]
     type: str = "choice"
+    multi: bool = False
 
     def __post_init__(self):
         _require_text(self.id, "id")
         _require_text(self.prompt, "prompt")
+        if not isinstance(self.multi, bool):
+            raise ValueError(f"{self.id}: multi must be a bool, got {self.multi!r}")
         if isinstance(self.options, str) or not isinstance(self.options, (list, tuple)):
             raise ValueError(
                 f"{self.id}: options must be a list or tuple of strings, "

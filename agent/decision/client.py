@@ -10,15 +10,15 @@ Transport seam: transports answer with their RAW payloads, either per
 question — `async def ask(question) -> dict` (#8's contract, served by
 MockTransport) — or as one batch call — `async def ask_batch(questions) ->
 dict[question_id, raw_payload]` (the real OpenRouter transports, issue #9),
-detected via duck-typing (getattr). The PRD §10 batch wire body (POST
-{"questions": [...]}) carries one state snapshot, so the batch path gets a
-single call with the whole question list; per-question transports keep the
+detected via duck-typing (getattr). The batch wire body (POST
+{"questions": {id: {...}}}) carries one state snapshot, so the batch path
+gets a single call with the whole question list; per-question transports keep the
 asyncio.gather fan-out (parallel INSIDE the client, so 5 x 500ms answers
 return in ~500ms, not 2.5s). Both paths preserve question order and parse
 each payload against its question, dropping anything that fails validation
 with a WARNING — so transport lies get caught per-answer. The transports
 themselves (issue #9): DecisionsModalityTransport POSTs the batch wire
-format to the OpenRouter decisions-modality endpoint for DECISION_MODEL;
+format to OpenRouter's alpha decisions endpoint for DECISION_MODEL;
 ChatStructuredTransport walks a model chain over chat completions with
 response_format: json_schema; FallbackChainTransport walks the two with
 <= MAX_ATTEMPTS_PER_TRANSPORT attempts each and raises TransportError when
@@ -28,6 +28,12 @@ Parsing rule table (_parse_answer; every drop logs one WARNING at the
 "bi-ai-ui.agent.decision" logger naming the question id, the offending
 answer id (or <missing>) and the reason):
 
+  0. Alpha responses are normalized first (_answers_mapping /
+     _normalize_answer): answers arrive as an object keyed by question id,
+     noul carries p(yes) under `noul`, and score carries a continuous index
+     into its ordered criteria (`score` + `legend`) — folded into the
+     internal id + probabilities shape, with score divided by criteria-1 so
+     it stays a [0, 1] value. Both shapes are accepted.
   1. payload not a dict / missing the id, type or probabilities key -> drop.
   2. payload id != question id -> drop (the transport answered something
      else; issue acceptance clause 3).
@@ -49,7 +55,7 @@ DecisionClient(transport, threshold=None) reads DECISION_THRESHOLD at
 construction when threshold is None (env read at use time, mirroring
 build_chat_model) and fails loud on anything not a number in [0, 1]. For
 noul the scalar is p(yes); for choice the max option probability; for
-score the score itself.
+score the normalized 0-1 score.
 
 Transport exceptions propagate out of decide() — no per-question
 resilience: a mock must fail ugly in tests. Transport-level resilience is
@@ -57,7 +63,7 @@ exactly what the fallback chain (FallbackChainTransport) provides across
 transports, with bounded attempts (no infinite retries).
 
 Question-type routing (issue #19, PRD §7): DECISION_MODEL_CHOICE /
-DECISION_MODEL_NOUL / DECISION_MODEL_SCORE replace the primary /decisions
+DECISION_MODEL_NOUL / DECISION_MODEL_SCORE replace the primary decisions
 model for their one question type; build_decision_client wires each set
 override its own chain and wraps those, with the plain chain as default,
 in TypeRoutedTransport — the router only partitions one ask_batch by type,
@@ -88,14 +94,20 @@ DEFAULT_THRESHOLD = 0.6
 # Issue #9 transport plumbing. Env names mirror graph.py's chat-model wiring:
 # read at construction, fail loud. DECISION_MODEL names the OpenRouter
 # decisions-modality model (PRD §8: ~perplexity/pplx-decider-flash-latest);
-# DECISION_FALLBACK_MODELS is the comma-separated chat-completions chain with
-# response_format: json_schema (anthropic/claude-haiku-5.5 is a documented
-# alternative member). DECISION_TIMEOUT_S bounds every request so the live
-# acceptance budget (answers within 10s) cannot hang on a stuck endpoint.
+# DECISION_ENDPOINT names the alpha decisions URL; DECISION_FALLBACK_MODELS
+# is the comma-separated chat-completions chain with response_format:
+# json_schema (openai/gpt-6-luna and anthropic/claude-haiku-5.5 both accept
+# it). DECISION_TIMEOUT_S bounds every request so the live acceptance budget
+# (answers within 10s) cannot hang on a stuck endpoint.
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_DECISION_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
 DEFAULT_DECISION_MODEL = "~perplexity/pplx-decider-flash-latest"
-DEFAULT_FALLBACK_MODELS = ("inception/mercury-decide:free", "openai/gpt-6-luna")
+DEFAULT_FALLBACK_MODELS = ("openai/gpt-6-luna", "anthropic/claude-haiku-5.5")
 DEFAULT_DECISION_TIMEOUT_S = 8.0
+# The alpha score wire type takes an ordered criteria array and answers with
+# a continuous index into it. Three rungs normalize to the 0/0.5/1 internal
+# scale; the labels match questions.py's dq_confidence prompt.
+SCORE_CRITERIA = ("not confident", "somewhat confident", "very confident")
 # Bounded retries (issue acceptance clause 3): at most this many ask_batch
 # attempts per transport in the fallback chain — one attempt is one HTTP
 # request — so worst case is 2 decisions + 2 models x 2 chain attempts = 6
@@ -173,15 +185,18 @@ class MockTransport:
 
 
 def _answers_mapping(raw):
-    """Normalize a decision response body to {answer_id: raw_payload}.
+    """Normalize a decision response body to {answer_id: normalized_payload}.
 
-    Accepts the raw wire body {"answers": [...]} or the contract spike's
-    {"meta": ..., "response": {...}} wrapper (one level of unwrapping, so
-    the committed snapshot parses like the live body it captured — issue
-    acceptance clause 1). Entries that are not dicts with a non-empty
-    string id are dropped with a WARNING (they cannot be mapped to a
-    question); a body without a usable answers list — or with no usable
-    entries at all — raises TransportError so the fallback chain engages.
+    Accepts both shapes the transports can return: the alpha decisions body
+    {"answers": {question_id: {...}}} (no id fields — the mapping key is the
+    id) and the chat fallback's legacy {"answers": [{id, type, ...}, ...]}.
+    The contract spike's {"meta": ..., "response": {...}} wrapper is
+    unwrapped one level, so the committed snapshot parses like the live body
+    it captured (issue acceptance clause 1). Every entry is folded to the
+    internal id + probabilities shape by _normalize_answer. Entries that
+    cannot be mapped are dropped with a WARNING; a body without a usable
+    answers object/list — or with no usable entries at all — raises
+    TransportError so the fallback chain engages.
     """
     if (
         isinstance(raw, dict)
@@ -192,14 +207,39 @@ def _answers_mapping(raw):
     if not isinstance(raw, dict):
         raise TransportError(f"decision response is not a JSON object: {raw!r}")
     answers = raw.get("answers")
-    if not isinstance(answers, list) or not answers:
+    if isinstance(answers, dict):
+        entries = []
+        for answer_id, entry in answers.items():
+            if not isinstance(answer_id, str) or not answer_id:
+                # Same one-WARNING-per-drop idiom as the rule table; the
+                # batch takes the question slot when the key is unusable.
+                _warn_drop(
+                    "<batch>",
+                    _answer_id_of(entry),
+                    "answer key is not a usable string id; it cannot be "
+                    "mapped to a question",
+                )
+                continue
+            if not isinstance(entry, dict):
+                _warn_drop(
+                    answer_id,
+                    _answer_id_of(entry),
+                    f"answer payload is not a dict: {entry!r}",
+                )
+                continue
+            # The alpha response is keyed by question id and does not repeat
+            # it in the payload; the key is authoritative.
+            entries.append({**entry, "id": answer_id})
+    elif isinstance(answers, list):
+        entries = answers
+    else:
         raise TransportError(
-            f"decision response has no non-empty 'answers' list: {raw!r}"
+            f"decision response has no 'answers' object or list: {raw!r}"
         )
     mapping = {}
-    for entry in answers:
+    for entry in entries:
         if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]:
-            mapping[entry["id"]] = entry
+            mapping[entry["id"]] = _normalize_answer(entry)
         else:
             # Same one-WARNING-per-drop idiom as the rule table; there is no
             # question to name here, so the batch itself takes that slot.
@@ -214,12 +254,171 @@ def _answers_mapping(raw):
     return mapping
 
 
-def _question_payload(question):
-    """PRD §10 wire shape for one question — options only on choice
-    questions (noul/score carry none)."""
+def _normalize_answer(payload):
+    """Fold alpha-native answer fields into the internal probabilities key.
+
+    Alpha choice answers already carry a probabilities dict. Alpha noul
+    answers carry p(yes) as `noul`; alpha score answers carry a continuous
+    index into the ordered criteria (`score`) plus a `legend`. The internal
+    contract is one float in [0, 1] for noul/score, so noul passes through
+    and score is divided by criteria-1. Anything else passes through and is
+    left to the parsing rule table.
+    """
+    answer_type = payload.get("type")
+    if answer_type == "score" and (
+        "score" in payload or isinstance(payload.get("probabilities"), dict)
+    ):
+        return {**payload, "probabilities": _unit_score(payload)}
+    if answer_type == "noul" and "noul" in payload:
+        return {**payload, "probabilities": payload["noul"]}
+    return payload
+
+
+def _unit_score(payload):
+    """Alpha score -> internal [0, 1] score.
+
+    `score` is a continuous expected index over the ordered criteria (e.g.
+    1.006 for the middle of a 3-rung scale); `legend`/`probabilities` name
+    the rungs. Divide by rungs-1; when `score` is absent, use the
+    probability-weighted index. Out-of-range values are returned as-is, not
+    clamped — _parse_answer drops them like any other fake-confidence
+    scalar — apart from sub-ULP endpoint noise.
+    """
+    probabilities = payload.get("probabilities")
+    levels = _score_levels(payload, probabilities)
+    score = payload.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        score = _expected_index(probabilities)
+    if score is None:
+        return None
+    unit = float(score) / max(levels - 1, 1)
+    # A weighted index can land a few ULPs outside the endpoints; snap only
+    # that floating-point noise, never a real outlier.
+    if -1e-9 < unit < 0.0:
+        return 0.0
+    if 1.0 < unit < 1.0 + 1e-9:
+        return 1.0
+    return unit
+
+
+def _score_levels(payload, probabilities):
+    """How many ordered criteria the alpha score answer used: the legend
+    length first, then the response probabilities, then the criteria the
+    transport sent."""
+    legend = payload.get("legend")
+    if isinstance(legend, (dict, list, tuple)) and legend:
+        return len(legend)
+    if isinstance(probabilities, dict) and probabilities:
+        return len(probabilities)
+    return len(SCORE_CRITERIA)
+
+
+def _expected_index(probabilities):
+    """Probability-weighted criteria index — the fallback when a score
+    answer has no `score` field; None when no usable distribution exists."""
+    if not isinstance(probabilities, dict) or not probabilities:
+        return None
+    weighted = total = 0.0
+    for key, probability in probabilities.items():
+        if isinstance(probability, bool) or not isinstance(
+            probability, (int, float)
+        ):
+            continue
+        try:
+            index = float(key)
+        except (TypeError, ValueError):
+            continue
+        weighted += index * probability
+        total += probability
+    return weighted / total if total > 0 else None
+
+
+def _decisions_question(question):
+    """Alpha decisions wire shape for one question (the object key is the
+    question id): the prompt travels as `instructions`, choice options
+    become a label->description criteria record (null descriptions — the
+    option ids are self-describing and the prompt carries the routing
+    guide), score carries the ordered criteria array, and noul needs none
+    (the wire type itself is yes/no)."""
+    payload = {"type": question.type, "instructions": question.prompt}
+    if question.type == "choice":
+        payload["criteria"] = {option: None for option in question.options}
+    elif question.type == "score":
+        payload["criteria"] = list(SCORE_CRITERIA)
+    return payload
+
+
+def _multi_choice_key(question_id, option):
+    """Wire id for one option of a multi-select choice question (alpha
+    answers each option as an independent noul)."""
+    return f"{question_id}::{option}"
+
+
+def _decisions_questions(questions):
+    """Alpha questions object for the batch. A multi-select ChoiceQuestion
+    (co-occurring options, e.g. the catalog) is not a categorical choice on
+    the alpha wire — `choice` is mutually exclusive and its probabilities
+    sum to 1 — so it fans out into one noul per option; every other
+    question keeps its natural type."""
+    payloads = {}
+    for question in questions:
+        if question.type == "choice" and getattr(question, "multi", False):
+            for option in question.options:
+                payloads[_multi_choice_key(question.id, option)] = {
+                    "type": "noul",
+                    "instructions": (
+                        f"{question.prompt} Answer only for the {option!r} "
+                        "component: does the answer need it?"
+                    ),
+                    "criteria": {
+                        "true": f"The answer needs {option}.",
+                        "false": f"The answer does not need {option}.",
+                    },
+                }
+        else:
+            payloads[question.id] = _decisions_question(question)
+    return payloads
+
+
+def _merge_multi_choice(questions, mapping):
+    """Fold the per-option noul answers back under the original
+    ChoiceQuestion id as a choice-shaped probability map; non-multi
+    questions pass through untouched."""
+    merged = dict(mapping)
+    for question in questions:
+        if question.type != "choice" or not getattr(question, "multi", False):
+            continue
+        probabilities = {}
+        for option in question.options:
+            payload = merged.pop(_multi_choice_key(question.id, option), None)
+            if payload is None:
+                continue
+            value = payload.get("probabilities")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            probabilities[option] = float(value)
+        merged[question.id] = {
+            "id": question.id,
+            "type": "choice",
+            "probabilities": probabilities,
+        }
+    return merged
+
+
+def _chat_question(question):
+    """Legacy chat-fallback wire shape for one question — id/prompt/options
+    as the json_schema fallback expects; the alpha batch uses
+    _decisions_questions instead. Multi-select choices stay one question
+    here: the prompt asks the chat model for an independent probability per
+    option."""
     payload = {"type": question.type, "id": question.id, "prompt": question.prompt}
     if question.type == "choice":
         payload["options"] = list(question.options)
+        if getattr(question, "multi", False):
+            payload["prompt"] = (
+                f"{question.prompt} Give a probability in [0, 1] for each "
+                "option; options may co-occur."
+            )
     return payload
 
 
@@ -247,13 +446,30 @@ def _resolve_timeout(timeout_s):
     return value
 
 
-class DecisionsModalityTransport:
-    """Primary transport: the OpenRouter decisions-modality endpoint.
+def _resolve_endpoint():
+    """The decisions URL: DECISION_ENDPOINT wins; otherwise a non-default
+    OPENROUTER_BASE_URL gets the legacy {base}/decisions path (so fake
+    servers and gateways that mirror the base keep working); otherwise the
+    live alpha endpoint. Read at construction like every other transport
+    setting."""
+    explicit = (os.getenv("DECISION_ENDPOINT") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    base = (os.getenv("OPENROUTER_BASE_URL") or "").strip().rstrip("/")
+    if base and base != OPENROUTER_BASE_URL:
+        return f"{base}/decisions"
+    return DEFAULT_DECISION_ENDPOINT
 
-    POSTs the PRD §10 batch wire format — {"model", "state", "questions"}
-    onto {OPENROUTER_BASE_URL}/decisions for DECISION_MODEL (default
-    ~perplexity/pplx-decider-flash-latest), bearer-authenticated, and
-    normalizes the {"answers": [...]} body to id -> raw payload. One
+
+class DecisionsModalityTransport:
+    """Primary transport: OpenRouter's alpha decisions endpoint.
+
+    POSTs the alpha batch wire format — {"model", "state", "questions"} with
+    questions keyed by id — to DECISION_ENDPOINT (default
+    https://openrouter.ai/api/alpha/decisions; a non-default
+    OPENROUTER_BASE_URL falls back to {base}/decisions) for DECISION_MODEL
+    (default ~perplexity/pplx-decider-flash-latest), bearer-authenticated,
+    and normalizes the id-keyed {"answers": {...}} body to id -> payload. One
     ask_batch call is ONE HTTP request; retries belong to the fallback
     chain (MAX_ATTEMPTS_PER_TRANSPORT bounds this transport to <=2
     requests). Any non-200 or unusable body raises TransportError so the
@@ -268,7 +484,7 @@ class DecisionsModalityTransport:
         self,
         api_key=None,
         model=None,
-        base_url=None,
+        endpoint=None,
         state=None,
         http_client=None,
         timeout_s=None,
@@ -285,11 +501,12 @@ class DecisionsModalityTransport:
             if model is not None
             else os.getenv("DECISION_MODEL", DEFAULT_DECISION_MODEL)
         )
-        self.base_url = (
-            base_url
-            if base_url is not None
-            else os.getenv("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL)
-        ).rstrip("/")
+        self.endpoint = (
+            endpoint if endpoint is not None else _resolve_endpoint()
+        )
+        if not isinstance(self.endpoint, str) or not self.endpoint.strip():
+            raise ValueError("decision endpoint must be a non-empty URL")
+        self.endpoint = self.endpoint.strip().rstrip("/")
         # Per-request state snapshot (PRD §10); the decide node (issue #10)
         # will own per-request plumbing — for now the constructor holds it.
         self.state = {} if state is None else state
@@ -305,7 +522,7 @@ class DecisionsModalityTransport:
     @staticmethod
     def parse(snapshot):
         """Normalize a decisions response body (or spike snapshot) to
-        {answer_id: raw_payload}; see _answers_mapping."""
+        {answer_id: normalized_payload}; see _answers_mapping."""
         return _answers_mapping(snapshot)
 
     def _client(self):
@@ -319,7 +536,7 @@ class DecisionsModalityTransport:
         return {
             "model": self.model,
             "state": self.state or {},
-            "questions": [_question_payload(q) for q in questions],
+            "questions": _decisions_questions(questions),
         }
 
     async def ask_batch(self, questions):
@@ -327,7 +544,7 @@ class DecisionsModalityTransport:
         TransportError (non-200, non-JSON, unusable body, network error)."""
         try:
             response = await self._client().post(
-                f"{self.base_url}/decisions",
+                self.endpoint,
                 json=self._request_body(questions),
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 timeout=self.timeout_s,
@@ -348,7 +565,7 @@ class DecisionsModalityTransport:
                 f"decisions endpoint returned a non-JSON body for model "
                 f"{self.model}: {exc}"
             ) from exc
-        mapping = _answers_mapping(body)
+        mapping = _merge_multi_choice(questions, _answers_mapping(body))
         self.last_raw_response = body
         return mapping
 
@@ -363,7 +580,7 @@ class ChatStructuredTransport:
     """Fallback transport: chat completions with JSON-schema structured output.
 
     Walks the model chain (DECISION_FALLBACK_MODELS, default
-    inception/mercury-decide:free then openai/gpt-6-luna) over
+    openai/gpt-6-luna then anthropic/claude-haiku-5.5) over
     {OPENROUTER_BASE_URL}/chat/completions with response_format: json_schema,
     asking the model to reply with the same {"answers": [...]} shape. One
     model per failed attempt: a FallbackChainTransport retry re-walks the
@@ -438,7 +655,7 @@ class ChatStructuredTransport:
                     "content": json.dumps(
                         {
                             "state": self.state or {},
-                            "questions": [_question_payload(q) for q in questions],
+                            "questions": [_chat_question(q) for q in questions],
                         }
                     ),
                 },
@@ -863,16 +1080,17 @@ def build_decision_client(threshold=None):
     #19) unset this is exactly the plain #9 wiring — one FallbackChainTransport
     of DecisionsModalityTransport + ChatStructuredTransport. Each SET override
     instead wires its own chain — same structure, with the override feeding
-    only the primary /decisions model, so DECISION_FALLBACK_MODELS stays the
+    only the primary decisions model, so DECISION_FALLBACK_MODELS stays the
     common chat fallback — and build_decision_client wraps the per-type
     chains (plus the plain chain as default) in a TypeRoutedTransport. Every
     transport reads its own env at construction: overrides apply on process
     boot / container recreate, never mid-process.
 
     Reads OPENROUTER_API_KEY / DECISION_MODEL / DECISION_MODEL_<TYPE> /
-    DECISION_FALLBACK_MODELS / DECISION_TIMEOUT_S / OPENROUTER_BASE_URL at
-    construction — a missing key raises RuntimeError HERE, at wiring time
-    (acceptance clause 4), not deep inside the first live decide call.
+    DECISION_ENDPOINT / DECISION_FALLBACK_MODELS / DECISION_TIMEOUT_S /
+    OPENROUTER_BASE_URL at construction — a missing key raises RuntimeError
+    HERE, at wiring time (acceptance clause 4), not deep inside the first
+    live decide call.
     """
 
     def _chain(model=None):

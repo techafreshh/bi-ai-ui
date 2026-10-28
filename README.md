@@ -30,8 +30,8 @@ React SPA (Vite) :5173           FastAPI agent (LangGraph) :8123     OpenRouter
 - The agent is a five-node LangGraph graph (`agent/graph.py`):
   `read_state` loads window-scoped KPI aggregates + data-quality stats from
   SQLite, `decide` fans a ≤7-question catalog set out through the
-  probabilistic `DecisionClient` (OpenRouter decisions-modality with a chat
-  fallback chain, `agent/decision/`; a deterministic heuristic transport
+  probabilistic `DecisionClient` (OpenRouter's alpha decisions endpoint with
+  a chat fallback chain, `agent/decision/`; a deterministic heuristic transport
   when no key is configured; off-catalog queries (no data domain) are
   answered by the deterministic guard transport without consulting the
   wired model (issue #18)), `layout` builds the A2UI draft from
@@ -112,14 +112,16 @@ Set your OpenRouter key (create one at https://openrouter.ai/keys) in
 |---|---|---|
 | `OPENROUTER_API_KEY` | yes (for chat) | OpenRouter key for the text model; without it the agent still boots, the decider falls back to its heuristic transport and fill writes KPI-grounded copy |
 | `TEXT_MODEL` | no (default `openai/gpt-6-luna`) | Chat model the fill node streams the narrative from |
-| `OPENROUTER_BASE_URL` | no (default `https://openrouter.ai/api/v1`) | OpenAI-compatible endpoint the text model and both decision transports POST to |
+| `OPENROUTER_BASE_URL` | no (default `https://openrouter.ai/api/v1`) | OpenAI-compatible base for the text model and the chat decision fallback; a non-default value also makes the decisions transport use `{base}/decisions` |
+| `DECISION_ENDPOINT` | no (default `https://openrouter.ai/api/alpha/decisions`) | Full decisions-modality URL; overrides the `OPENROUTER_BASE_URL`-derived decisions path |
 | `DECISION_MODEL` | no (default `~perplexity/pplx-decider-flash-latest`) | Decisions-modality model the primary decision transport POSTs to; shown verbatim as `decisions[].model` |
 | `DECISION_MODEL_CHOICE` | no (default empty) | Per-type `DECISION_MODEL` override for choice questions only; empty or whitespace = use `DECISION_MODEL` |
 | `DECISION_MODEL_NOUL` | no (default empty) | Per-type `DECISION_MODEL` override for noul questions only; empty or whitespace = use `DECISION_MODEL` |
 | `DECISION_MODEL_SCORE` | no (default empty) | Per-type `DECISION_MODEL` override for score questions only; empty or whitespace = use `DECISION_MODEL` |
-| `DECISION_FALLBACK_MODELS` | no (default `inception/mercury-decide:free,openai/gpt-6-luna`) | Comma-separated chat-completions fallback chain (json_schema structured output) |
+| `DECISION_FALLBACK_MODELS` | no (default `openai/gpt-6-luna,anthropic/claude-haiku-5.5`) | Comma-separated chat-completions fallback chain (json_schema structured output); members must be chat models |
 | `DECISION_THRESHOLD` | no (default `0.6`) | Min probability for `above_threshold` flagging on decision answers; below it the component is cut from the layout |
 | `DECISION_TIMEOUT_S` | no (default `8.0`) | Per-request timeout in seconds for both decision transports |
+| `SPA_ORIGIN` | no (default `http://localhost:5173`) | Browser origin allowed by the agent's CORS middleware; set it when the SPA is served from a different origin (e.g. a remapped Docker web port) |
 | `AGENT_HOST` | no (default `0.0.0.0`) | Bind host for `python server.py` (the `--host` default), read ahead of `HOST` |
 | `HOST` | no (default `0.0.0.0`) | Fallback bind host when `AGENT_HOST` is unset or empty |
 | `AGENT_PORT` | no (default `8123`) | Bind port for `python server.py` (the `--port` default), read ahead of `PORT` |
@@ -132,6 +134,28 @@ picks up an edited `agent/.env` by recreating the container — no rebuild,
 no code edits. Per-type overrides left empty fall back to `DECISION_MODEL`,
 and each decision's `model` field names the model that actually answered
 it (the heuristic fallback reports `"heuristic"`, never a guessed string).
+
+### Remapped Docker ports
+
+The host-side ports and the browser-visible agent URL are env-driven, so the
+stack can run away from 5173/8123. Put these in a repo-root `.env`
+(gitignored; Compose reads it for interpolation), then rebuild:
+
+```bash
+AGENT_HOST_PORT=10329
+WEB_HOST_PORT=12308
+VITE_AGENT_URL=http://localhost:10329/copilotkit
+SPA_ORIGIN=http://localhost:12308
+```
+
+```bash
+docker compose up -d --build
+```
+
+`VITE_AGENT_URL` is the URL the BROWSER calls (not the in-container
+`http://agent:8123`); `SPA_ORIGIN` must be the SPA's browser origin or the
+agent's CORS preflight rejects the chat. `scripts/verify_demo.py` defaults
+to the 8123/5173 pair — override `AGENT_URL` and `WEB_URL` to match.
 
 ## Demo script
 
@@ -164,9 +188,9 @@ rebuild):
 ```bash
 # in agent/.env — the relevant lines:
 # swap the decision model (visible in the drawer's decisions[].model):
-DECISION_MODEL=inception/mercury-decide:free
+DECISION_MODEL=inception/mercury-decide
 # or override one question type only (choice / noul / score):
-DECISION_MODEL_CHOICE=inception/mercury-decide:free
+DECISION_MODEL_CHOICE=inception/mercury-decide
 # swap the narrative (text) model:
 TEXT_MODEL=openai/gpt-6-luna
 # retire components below a stricter endorsement line:

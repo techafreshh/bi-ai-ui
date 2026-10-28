@@ -2,7 +2,9 @@ services:
   agent:
     build: ./agent
     ports:
-      - "8123:8123"
+      # Host port is env-driven (AGENT_HOST_PORT) so remapped sandboxes and
+      # parallel stacks do not collide; the container port stays pinned.
+      - "${AGENT_HOST_PORT:-8123}:8123"
     # env_file is the whole env passthrough (issue #19): every variable in
     # agent/.env reaches the container as-is — models, threshold, bind
     # address — and an edit applies via `docker compose up -d agent`
@@ -18,6 +20,8 @@ services:
         required: false
     environment:
       RESEED: ${RESEED:-0}
+      # Browser origin allowed by CORS; must match where the SPA is served.
+      SPA_ORIGIN: ${SPA_ORIGIN:-http://localhost:5173}
     # agent/db.py:DEFAULT_DB_PATH resolves from the file location, never
     # the cwd: parents[1]/data/app.db. In-container db.py is /app/db.py
     # (WORKDIR /app), so the path is /data/app.db — this bind mount lands
@@ -40,7 +44,11 @@ services:
   web:
     build: ./web
     ports:
-      - "5173:5173"
+      - "${WEB_HOST_PORT:-5173}:5173"
+    environment:
+      # Vite inlines VITE_* at dev-server startup. This is the agent endpoint
+      # the BROWSER calls, so with remapped ports it must name the host port.
+      VITE_AGENT_URL: ${VITE_AGENT_URL:-http://localhost:8123/copilotkit}
     depends_on:
       agent:
         condition: service_healthy

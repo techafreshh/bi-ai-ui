@@ -17,7 +17,11 @@ import httpx
 import pytest
 
 import decision
-from decision.client import DEFAULT_DECISION_MODEL, DEFAULT_FALLBACK_MODELS
+from decision.client import (
+    DEFAULT_DECISION_ENDPOINT,
+    DEFAULT_DECISION_MODEL,
+    DEFAULT_FALLBACK_MODELS,
+)
 
 AGENT_DIR = Path(__file__).resolve().parents[1]
 DECISION_LOGGER = "bi-ai-ui.agent.decision"
@@ -40,6 +44,7 @@ def _canonical_questions():
             id="which-components",
             prompt="Which catalog components does this query need?",
             options=CATALOG_OPTIONS,
+            multi=True,
         ),
         decision.NoulQuestion(
             id="is-data-problem",
@@ -48,22 +53,38 @@ def _canonical_questions():
     ]
 
 
+CHOICE_PROBS = {
+    "kpi_row": 0.43,
+    "line_chart": 0.25,
+    "variance_callout": 0.12,
+    "data_table": 0.10,
+    "data_quality_card": 0.06,
+    "insight_text": 0.04,
+}
+
+
 def _canon_answers(choice_probs=None):
-    """A valid PRD §10 answers body for the canonical questions."""
+    """A valid alpha decisions body for the expanded canonical questions —
+    answers keyed by wire id, no id fields. The catalog choice is six
+    per-option nouls (alpha choice itself is mutually exclusive), and the
+    data-problem noul is under `noul` (the live shape)."""
+    probabilities = choice_probs or CHOICE_PROBS
+    answers = {
+        f"which-components::{option}": {"type": "noul", "noul": probability}
+        for option, probability in probabilities.items()
+    }
+    answers["is-data-problem"] = {"type": "noul", "noul": 0.92}
+    return {"answers": answers}
+
+
+def _chat_answers():
+    """The fallback chat transport's internal answers-array shape."""
     return {
         "answers": [
             {
                 "id": "which-components",
                 "type": "choice",
-                "probabilities": choice_probs
-                or {
-                    "kpi_row": 0.43,
-                    "line_chart": 0.25,
-                    "variance_callout": 0.12,
-                    "data_table": 0.10,
-                    "data_quality_card": 0.06,
-                    "insight_text": 0.04,
-                },
+                "probabilities": CHOICE_PROBS,
             },
             {"id": "is-data-problem", "type": "noul", "probabilities": 0.92},
         ]
@@ -112,12 +133,11 @@ def test_missing_api_key_fails_at_construction(monkeypatch):
     decision.DecisionClient(decision.MockTransport())
 
 
-def test_decisions_transport_sends_prd_wire_format(monkeypatch):
+def test_decisions_transport_sends_alpha_wire_format(monkeypatch):
     """Acceptance clause 1 (wire shape): the decisions transport POSTs the
-    PRD §10 batch body — bearer key, DECISION_MODEL model, one state
-    snapshot, options only on the choice question — and returns (and parse
-    re-derives) the id -> raw payload mapping from the {"answers": [...]}
-    body."""
+    alpha batch body — bearer key, DECISION_MODEL model, one state snapshot,
+    questions keyed by id, prompt under `instructions`, choice criteria as a
+    label->description record — and normalizes the id-keyed answers body."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("DECISION_MODEL", "stub/decider")
     monkeypatch.delenv("DECISION_TIMEOUT_S", raising=False)
@@ -134,7 +154,7 @@ def test_decisions_transport_sends_prd_wire_format(monkeypatch):
         return httpx.Response(200, json=_canon_answers())
 
     transport = decision.DecisionsModalityTransport(
-        base_url="http://decisions.test",
+        endpoint="http://decisions.test/api/alpha/decisions",
         state={"arr_trend": "up"},
         http_client=_mock_client(handler),
     )
@@ -144,26 +164,67 @@ def test_decisions_transport_sends_prd_wire_format(monkeypatch):
 
     assert len(requests) == 1
     wire = requests[0]
-    assert wire["path"] == "/decisions"
+    assert wire["path"] == "/api/alpha/decisions"
     assert wire["authorization"] == "Bearer test-key"
     assert wire["body"]["model"] == "stub/decider"
     assert wire["body"]["state"] == {"arr_trend": "up"}
     sent = wire["body"]["questions"]
-    assert [q["id"] for q in sent] == ["which-components", "is-data-problem"]
-    # options only on the choice question (PRD §10 wire format)
-    assert sent[0]["options"] == CATALOG_OPTIONS
-    assert "options" not in sent[1]
+    assert list(sent) == [
+        *(f"which-components::{option}" for option in CATALOG_OPTIONS),
+        "is-data-problem",
+    ]
+    for option in CATALOG_OPTIONS:
+        expanded = sent[f"which-components::{option}"]
+        assert expanded["type"] == "noul"
+        assert "Which catalog components" in expanded["instructions"]
+        assert option in expanded["instructions"]
+        assert expanded["criteria"] == {
+            "true": f"The answer needs {option}.",
+            "false": f"The answer does not need {option}.",
+        }
+        assert "id" not in expanded and "options" not in expanded
+    assert sent["is-data-problem"] == {
+        "type": "noul",
+        "instructions": "Does the evidence point to a data problem?",
+    }
     assert set(mapping) == {"which-components", "is-data-problem"}
+    assert mapping["which-components"]["probabilities"] == CHOICE_PROBS
     assert mapping["is-data-problem"]["probabilities"] == 0.92
-    # parse over the raw body (no transport instance state needed) matches.
-    assert decision.DecisionsModalityTransport.parse(_canon_answers()) == mapping
+    # parse sees the raw expanded wire ids; ask_batch is what folds them back.
+    raw = decision.DecisionsModalityTransport.parse(_canon_answers())
+    assert set(raw) == {
+        *(f"which-components::{option}" for option in CATALOG_OPTIONS),
+        "is-data-problem",
+    }
+
+
+def test_decision_endpoint_resolution_precedence(monkeypatch):
+    """The decisions URL resolves at construction: DECISION_ENDPOINT wins,
+    a non-default OPENROUTER_BASE_URL derives the legacy {base}/decisions
+    path (fake-server seam), and otherwise the live alpha URL is used."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("DECISION_ENDPOINT", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    transport = decision.DecisionsModalityTransport()
+    assert transport.endpoint == DEFAULT_DECISION_ENDPOINT
+    asyncio.run(transport.aclose())
+
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "http://fake.test/")
+    transport = decision.DecisionsModalityTransport()
+    assert transport.endpoint == "http://fake.test/decisions"
+    asyncio.run(transport.aclose())
+
+    monkeypatch.setenv("DECISION_ENDPOINT", "http://explicit.test/alpha/")
+    transport = decision.DecisionsModalityTransport()
+    assert transport.endpoint == "http://explicit.test/alpha"
+    asyncio.run(transport.aclose())
 
 
 def test_decisions_transport_retries_then_transport_error(monkeypatch):
     """Acceptance clause 3 (bounded): a bare decisions transport makes
     exactly ONE request per ask_batch and raises TransportError on 401; the
     chain retries it up to MAX_ATTEMPTS_PER_TRANSPORT=2 — exactly 2
-    requests to /decisions, then TransportError, never more."""
+    requests to the alpha endpoint, then TransportError, never more."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     hits = []
 
@@ -173,19 +234,19 @@ def test_decisions_transport_retries_then_transport_error(monkeypatch):
 
     def make_transport():
         return decision.DecisionsModalityTransport(
-            base_url="http://decisions.test",
+            endpoint="http://decisions.test/api/alpha/decisions",
             http_client=_mock_client(handler),
         )
 
     with pytest.raises(decision.TransportError):
         asyncio.run(make_transport().ask_batch(_canonical_questions()))
-    assert hits == ["/decisions"]
+    assert hits == ["/api/alpha/decisions"]
 
     hits.clear()
     chain = decision.FallbackChainTransport([make_transport()])
     with pytest.raises(decision.TransportError):
         asyncio.run(chain.ask_batch(_canonical_questions()))
-    assert hits.count("/decisions") == 2
+    assert hits.count("/api/alpha/decisions") == 2
     assert decision.MAX_ATTEMPTS_PER_TRANSPORT == 2
 
 
@@ -198,6 +259,7 @@ def test_fallback_engages_on_decisions_failure(monkeypatch, caplog):
     DecisionsModalityTransport."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("OPENROUTER_BASE_URL", "http://fallback.test/")
+    monkeypatch.setenv("DECISION_ENDPOINT", "http://fallback.test/decisions")
     monkeypatch.delenv("DECISION_MODEL", raising=False)
     monkeypatch.delenv("DECISION_FALLBACK_MODELS", raising=False)
     monkeypatch.delenv("DECISION_THRESHOLD", raising=False)
@@ -211,7 +273,7 @@ def test_fallback_engages_on_decisions_failure(monkeypatch, caplog):
             return httpx.Response(401, text="bad key")
         hits["chat"] += 1
         chat_requests.append(json.loads(request.content.decode()))
-        return httpx.Response(200, json=_chat_body(_canon_answers()))
+        return httpx.Response(200, json=_chat_body(_chat_answers()))
 
     client = decision.build_decision_client()
     # Factory wiring works when a key is present; for the HTTP contract the
@@ -271,13 +333,13 @@ def test_request_timeout_triggers_bounded_fallback(monkeypatch, caplog):
             hits["decisions"] += 1
             raise httpx.ReadTimeout("mock read timeout")
         hits["chat"] += 1
-        return httpx.Response(200, json=_chat_body(_canon_answers()))
+        return httpx.Response(200, json=_chat_body(_chat_answers()))
 
     client = decision.DecisionClient(
         decision.FallbackChainTransport(
             [
                 decision.DecisionsModalityTransport(
-                    base_url="http://timeout.test",
+                    endpoint="http://timeout.test/decisions",
                     http_client=_mock_client(handler),
                 ),
                 decision.ChatStructuredTransport(
@@ -316,7 +378,7 @@ def test_chat_transport_walks_model_chain_bounded(monkeypatch):
     hits = {"decisions": 0, "chat": 0}
 
     def handler(request):
-        if request.url.path == "/decisions":
+        if request.url.path == "/api/alpha/decisions":
             hits["decisions"] += 1
         else:
             hits["chat"] += 1
@@ -325,7 +387,8 @@ def test_chat_transport_walks_model_chain_bounded(monkeypatch):
     chain = decision.FallbackChainTransport(
         [
             decision.DecisionsModalityTransport(
-                base_url="http://chain.test", http_client=_mock_client(handler)
+                endpoint="http://chain.test/api/alpha/decisions",
+                http_client=_mock_client(handler),
             ),
             decision.ChatStructuredTransport(
                 models=["m-one", "m-two"],
@@ -358,7 +421,7 @@ def test_chat_transport_rejects_unusable_content(monkeypatch, caplog):
             return httpx.Response(
                 200, json={"choices": [{"message": {"content": "not json at all"}}]}
             )
-        return httpx.Response(200, json=_chat_body(_canon_answers()))
+        return httpx.Response(200, json=_chat_body(_chat_answers()))
 
     transport = decision.ChatStructuredTransport(
         models=["m-bad", "m-good"],
@@ -412,10 +475,11 @@ def test_decide_accepts_batch_transport(caplog):
 
 def test_parse_contract_snapshot_yields_answers_for_every_question_id(monkeypatch):
     """Acceptance clause 1: the committed contract snapshot — the spike's
-    {"meta", "response"} capture of the real decisions wire body — parses
-    via DecisionsModalityTransport.parse (no key, no instance) into answers
-    for the two canonical question ids, with [0,1]-bounded probabilities:
-    a dict over catalog options for the choice, a float for the noul."""
+    {"meta", "response"} capture of the real alpha decisions wire body —
+    parses via DecisionsModalityTransport.parse (no key, no instance) into
+    one answer per expanded question id, with [0,1]-bounded probabilities:
+    a noul per catalog option (the multi-select fan-out), the data-problem
+    noul, and the normalized 0-1 score."""
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("DECISION_MODEL", raising=False)
     snapshot = json.loads(
@@ -423,16 +487,47 @@ def test_parse_contract_snapshot_yields_answers_for_every_question_id(monkeypatc
     )
     mapping = decision.DecisionsModalityTransport.parse(snapshot)
 
-    assert set(mapping) == {"which-components", "is-data-problem"}
-    choice = mapping["which-components"]["probabilities"]
-    assert isinstance(choice, dict)
-    assert set(choice) <= set(CATALOG_OPTIONS)
-    assert choice and all(
-        not isinstance(v, bool) and 0.0 <= v <= 1.0 for v in choice.values()
-    )
+    assert set(mapping) == {
+        *(f"which-components::{option}" for option in CATALOG_OPTIONS),
+        "is-data-problem",
+        "dq-confidence",
+    }
+    for option in CATALOG_OPTIONS:
+        probability = mapping[f"which-components::{option}"]["probabilities"]
+        assert not isinstance(probability, bool)
+        assert 0.0 <= probability <= 1.0
     noul = mapping["is-data-problem"]["probabilities"]
     assert not isinstance(noul, bool) and isinstance(noul, (int, float))
     assert 0.0 <= noul <= 1.0
+    score = mapping["dq-confidence"]["probabilities"]
+    assert not isinstance(score, bool) and isinstance(score, (int, float))
+    assert 0.0 <= score <= 1.0
+
+
+def test_alpha_score_is_normalized_and_never_clamped(caplog):
+    """Alpha score normalization: a continuous criteria index folds to the
+    internal [0,1] scalar, while an out-of-range index (3.0 on a 3-rung
+    scale -> 1.5) is dropped whole, never clamped."""
+    question = decision.ScoreQuestion(id="momentum", prompt="rate?")
+    raw = {
+        "answers": {
+            "momentum": {
+                "type": "score",
+                "score": 1.0057,
+                "legend": {"0": "low", "1": "mid", "2": "high"},
+                "probabilities": {"0": 0.3, "1": 0.4, "2": 0.3},
+            }
+        }
+    }
+    mapping = decision.DecisionsModalityTransport.parse(raw)
+    assert mapping["momentum"]["probabilities"] == pytest.approx(1.0057 / 2)
+
+    raw["answers"]["momentum"]["score"] = 3.0
+    mapping = decision.DecisionsModalityTransport.parse(raw)
+    client = decision.DecisionClient(decision.MockTransport(answers=mapping))
+    with caplog.at_level(logging.WARNING, logger=DECISION_LOGGER):
+        assert asyncio.run(client.decide([question])) == []
+    assert "1.5" in caplog.records[0].getMessage()
 
 
 # --- Issue #19: per-type model overrides and the TypeRoutedTransport ---------
@@ -450,23 +545,34 @@ def _router_questions():
 
 
 def _answers_for(questions):
-    """Valid PRD §10 answers echoing each wire question (dict probabilities
-    for choice, 0.9 for noul/score) — what the mock /decisions endpoint
-    replies no matter which type partition reached it."""
-    return {
-        "answers": [
-            {
-                "id": q["id"],
-                "type": q["type"],
-                "probabilities": (
-                    {option: 0.9 for option in q["options"]}
-                    if q["type"] == "choice"
-                    else 0.9
-                ),
+    """Alpha-shaped answers echoing each id-keyed request question (choice
+    probabilities, noul p(yes), score index + legend) — what the mock alpha
+    endpoint replies no matter which type partition reached it."""
+    answers = {}
+    for question_id, question in questions.items():
+        if question["type"] == "choice":
+            answers[question_id] = {
+                "type": "choice",
+                "choice": next(iter(question["criteria"])),
+                "probabilities": {
+                    option: 0.9 for option in question["criteria"]
+                },
             }
-            for q in questions
-        ]
-    }
+        elif question["type"] == "noul":
+            answers[question_id] = {"type": "noul", "noul": 0.9}
+        else:
+            criteria = question["criteria"]
+            answers[question_id] = {
+                "type": "score",
+                "score": 1.0,
+                "legend": {
+                    str(index): label for index, label in enumerate(criteria)
+                },
+                "probabilities": {
+                    str(index): 0.5 for index in range(len(criteria))
+                },
+            }
+    return {"answers": answers}
 
 
 def test_per_type_model_reads_override_env(monkeypatch):
@@ -495,6 +601,10 @@ def test_build_decision_client_plain_wiring_is_structurally_unchanged(monkeypatc
     FallbackChainTransport of DecisionsModalityTransport +
     ChatStructuredTransport, no router in between."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("DECISION_ENDPOINT", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("DECISION_MODEL", raising=False)
+    monkeypatch.delenv("DECISION_FALLBACK_MODELS", raising=False)
     for var in ("DECISION_MODEL_CHOICE", "DECISION_MODEL_NOUL", "DECISION_MODEL_SCORE"):
         monkeypatch.delenv(var, raising=False)
 
@@ -503,13 +613,14 @@ def test_build_decision_client_plain_wiring_is_structurally_unchanged(monkeypatc
     primary, fallback = client.transport.transports
     assert isinstance(primary, decision.DecisionsModalityTransport)
     assert primary.model == DEFAULT_DECISION_MODEL
+    assert primary.endpoint == DEFAULT_DECISION_ENDPOINT
     assert isinstance(fallback, decision.ChatStructuredTransport)
     asyncio.run(client.transport.aclose())
 
 
 def test_build_decision_client_wires_per_type_routes(monkeypatch):
     """Issue #19 (factory wiring): each SET override gets its own fallback
-    chain whose primary /decisions transport carries that model string,
+    chain whose primary decisions transport carries that model string,
     routed under a TypeRoutedTransport whose default stays the plain
     DECISION_MODEL chain; the chat fallback chain still walks
     DECISION_FALLBACK_MODELS for every route."""
@@ -560,13 +671,15 @@ def test_type_routed_transport_partitions_by_type_and_merges(monkeypatch):
 
     def handler(request):
         body = json.loads(request.content.decode())
-        requests.append((request.url.path, body["model"], [q["id"] for q in body["questions"]]))
+        requests.append(
+            (request.url.path, body["model"], list(body["questions"]))
+        )
         return httpx.Response(200, json=_answers_for(body["questions"]))
 
     def make(model):
         return decision.DecisionsModalityTransport(
             model=model,
-            base_url="http://route.test",
+            endpoint="http://route.test/api/alpha/decisions",
             http_client=_mock_client(handler),
         )
 
@@ -582,13 +695,14 @@ def test_type_routed_transport_partitions_by_type_and_merges(monkeypatch):
     # One request per partition, in first-question order: choice first, then
     # the unrouted noul partition (default), then score.
     assert requests == [
-        ("/decisions", "x/y", ["q-choice", "q-choice-two"]),
-        ("/decisions", "stub/default", ["q-noul"]),
-        ("/decisions", "z/w", ["q-score"]),
+        ("/api/alpha/decisions", "x/y", ["q-choice", "q-choice-two"]),
+        ("/api/alpha/decisions", "stub/default", ["q-noul"]),
+        ("/api/alpha/decisions", "z/w", ["q-score"]),
     ]
     assert [a.id for a in answers] == ["q-choice", "q-noul", "q-score", "q-choice-two"]
     assert answers[0].probabilities == {"a": 0.9, "b": 0.9}
     assert answers[1].probabilities == pytest.approx(0.9)
+    assert answers[2].probabilities == pytest.approx(0.5)  # index 1 / 2
     assert answers[3].above_threshold is True
 
 

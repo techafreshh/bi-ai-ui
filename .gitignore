@@ -24,3 +24,5 @@ __pycache__/
 
 # Build output
 web/dist/
+
+.agents/skills/

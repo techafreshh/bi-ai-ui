@@ -34,6 +34,11 @@ def fake_provider(monkeypatch) -> Iterator[FakeOpenAICompatServer]:
     with FakeOpenAICompatServer(reply=REPLY) as server:
         monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
         monkeypatch.setenv("OPENROUTER_BASE_URL", server.base_url)
+        # server.py load_dotenv() may repopulate a local DECISION_ENDPOINT;
+        # pin it to the fake so no test ever reaches the live alpha API.
+        monkeypatch.setenv(
+            "DECISION_ENDPOINT", f"{server.base_url}/api/alpha/decisions"
+        )
         monkeypatch.delenv("TEXT_MODEL", raising=False)  # default model id
         import graph as agent_graph
 
@@ -88,8 +93,8 @@ def test_fill_calls_openai_compatible_provider(fake_provider):
 
     # The recorded request keeps the OpenRouter-shaped contract: bearer
     # key, default model id, chat-completions path. Decide ran first (its
-    # /v1/decisions probes 404 on this fake and fell back), so fill's call
-    # is the LAST chat-completions request the fake recorded.
+    # decisions probe 404s on this fake and fell back), so fill's call is
+    # the LAST chat-completions request the fake recorded.
     chat_requests = [
         request for request in fake_provider.requests
         if request["path"].endswith("/v1/chat/completions")

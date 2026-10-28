@@ -41,11 +41,15 @@ class EnvVar:
 # Defaults mirrored from the owning modules; tests/test_env_contract.py pins
 # each against its owner's constant so the two cannot drift.
 _OPENROUTER_BASE_URL_DEFAULT = "https://openrouter.ai/api/v1"
+_DECISION_ENDPOINT_DEFAULT = "https://openrouter.ai/api/alpha/decisions"
 _TEXT_MODEL_DEFAULT = "openai/gpt-6-luna"
 _DECISION_MODEL_DEFAULT = "~perplexity/pplx-decider-flash-latest"
-_DECISION_FALLBACK_MODELS_DEFAULT = "inception/mercury-decide:free,openai/gpt-6-luna"
+_DECISION_FALLBACK_MODELS_DEFAULT = (
+    "openai/gpt-6-luna,anthropic/claude-haiku-5.5"
+)
 _DECISION_THRESHOLD_DEFAULT = "0.6"
 _DECISION_TIMEOUT_S_DEFAULT = "8.0"
+_SPA_ORIGIN_DEFAULT = "http://localhost:5173"
 _AGENT_HOST_DEFAULT = "0.0.0.0"
 _AGENT_PORT_DEFAULT = "8123"
 
@@ -74,9 +78,19 @@ ENV_VARS: tuple[EnvVar, ...] = (
         default=_OPENROUTER_BASE_URL_DEFAULT,
         required=False,
         purpose=(
-            "OpenAI-compatible endpoint the text model and both decision "
-            "transports POST to; set it only to point them at a different "
-            "(e.g. fake, for tests) server."
+            "OpenAI-compatible base the text model and the chat decision "
+            "fallback POST to; when set to a non-default value the decisions "
+            "transport uses {base}/decisions (a fake/test server)."
+        ),
+    ),
+    EnvVar(
+        name="DECISION_ENDPOINT",
+        default=_DECISION_ENDPOINT_DEFAULT,
+        required=False,
+        purpose=(
+            "Full URL of the decisions-modality endpoint (OpenRouter's alpha "
+            "API by default); overrides the OPENROUTER_BASE_URL-derived "
+            "decisions path for a gateway or fake server."
         ),
     ),
     EnvVar(
@@ -120,8 +134,9 @@ ENV_VARS: tuple[EnvVar, ...] = (
         default=_DECISION_FALLBACK_MODELS_DEFAULT,
         required=False,
         purpose=(
-            "Comma-separated chat-completions fallback chain, walked with "
-            "response_format: json_schema when the decisions endpoint fails."
+            "Comma-separated chat-completions model chain, walked with "
+            "response_format: json_schema when the decisions endpoint fails; "
+            "members must be chat models, not decisions-only models."
         ),
     ),
     EnvVar(
@@ -142,6 +157,16 @@ ENV_VARS: tuple[EnvVar, ...] = (
         purpose=(
             "Per-request timeout in seconds for both decision transports, "
             "keeping a stuck endpoint inside the live 10s answer budget."
+        ),
+    ),
+    EnvVar(
+        name="SPA_ORIGIN",
+        default=_SPA_ORIGIN_DEFAULT,
+        required=False,
+        purpose=(
+            "Browser origin allowed by the agent's CORS middleware. Set it "
+            "when the SPA is served from a different origin than the "
+            "native-dev default (e.g. a remapped Docker web port)."
         ),
     ),
     EnvVar(

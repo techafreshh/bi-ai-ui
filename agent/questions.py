@@ -313,10 +313,10 @@ def build_question_set(query_text, snapshot):
                 "need variance_callout and data_table; data-cleanliness "
                 "questions need data_quality_card; anything without data "
                 "support gets insight_text. "
-                "Which catalog components does the answer to this query "
-                "need? Give a probability in [0, 1] for each option."
+                "Which catalog components does the answer to this query need?"
             ),
             options=list(CATALOG_TYPES),
+            multi=True,
         ),
         NoulQuestion(
             id=DATA_PROBLEM_QUESTION_ID,
@@ -339,8 +339,8 @@ def build_question_set(query_text, snapshot):
             id=DQ_CONFIDENCE_QUESTION_ID,
             prompt=(
                 context
-                + "Score in [0, 1]: how confident are you that the data for "
-                "this window is clean?"
+                + "Rate how confident you are that the data for this window "
+                "is clean, from 'not confident' to 'very confident'."
             ),
         ),
     ]
