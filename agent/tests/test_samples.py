@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from test_generate_data import EXPECTED_COLUMNS
@@ -174,6 +174,55 @@ def test_account_arr_matches_subscription_deltas():
         totals[row["account_id"]] += int(row["arr_delta_cents"])
     for account_id, account in accounts.items():
         assert totals[account_id] == int(account["arr_cents"]), account_id
+
+
+def test_revenue_keys_unique_and_point_in_time():
+    """Revenue is priced at the point-in-time ARR: exactly one row per
+    (account_id,event_date) — each subscription point's segment ends the
+    day before the next point (the iter_revenue_events parity), so upgrade
+    days bill once at the new rate and cancel days bill once."""
+    events = _rows("revenue_events")
+    keys = [(row["account_id"], row["event_date"]) for row in events]
+    assert len(keys) == len(set(keys)), "double-billed (account,day) key"
+    accounts = {row["id"]: row for row in _rows("accounts")}
+    subs = _rows("subscription_events")
+    points = defaultdict(list)  # account_id -> sorted [(date, running_arr)]
+    running = defaultdict(int)
+    for row in sorted(subs, key=lambda row: (row["event_date"], row["id"])):
+        running[row["account_id"]] += int(row["arr_delta_cents"])
+        points[row["account_id"]].append(
+            (row["event_date"], running[row["account_id"]])
+        )
+    price = {}
+    for account_id, account_points in points.items():
+        for index, (from_day, arr) in enumerate(account_points):
+            if index + 1 < len(account_points):
+                end_day = (
+                    date.fromisoformat(account_points[index + 1][0])
+                    - timedelta(days=1)
+                ).isoformat()
+            else:
+                end_day = max(
+                    row["event_date"]
+                    for row in events
+                    if row["account_id"] == account_id
+                )
+            day = from_day
+            while day <= end_day:
+                price.setdefault((account_id, day), str(arr // 365))
+                day = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+    for row in events:
+        assert row["amount_cents"] == price[
+            (row["account_id"], row["event_date"])
+        ], row
+        assert accounts[row["account_id"]]["created_at"] <= row["event_date"], row
+    cancels = {
+        row["account_id"]: row["event_date"]
+        for row in subs if row["event_type"] == "cancel"
+    }
+    for row in events:
+        if row["account_id"] in cancels:
+            assert row["event_date"] <= cancels[row["account_id"]], row
 
 
 def test_exporter_rerun_reproduces_committed_samples(tmp_path):

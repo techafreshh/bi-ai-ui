@@ -198,9 +198,18 @@ def build_dataset(rng):
     for account in accounts:
         account_id = account["id"]
         end = min(churn_dates.get(account_id, REVENUE_END), REVENUE_END)
-        for from_day, arr_cents in timelines[account_id]:
+        points = timelines[account_id]
+        for index, (from_day, arr_cents) in enumerate(points):
             rate = arr_cents // PRO_RATA_DAYS
-            segment_end = end
+            # Point-in-time segment: this ARR prices from_day through the
+            # day before the next point (generate_data.iter_revenue_events
+            # parity), capped at the churn/month end.
+            if index + 1 < len(points):
+                segment_end = min(
+                    points[index + 1][0] - timedelta(days=1), end
+                )
+            else:
+                segment_end = end
             day = max(from_day, REVENUE_START)
             # Skip pre-slice points (the 'new' events predate August) except
             # the point active when the slice opens.
