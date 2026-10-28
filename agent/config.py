@@ -52,6 +52,7 @@ _DECISION_TIMEOUT_S_DEFAULT = "8.0"
 _SPA_ORIGIN_DEFAULT = "http://localhost:5173"
 _AGENT_HOST_DEFAULT = "0.0.0.0"
 _AGENT_PORT_DEFAULT = "8123"
+_UPLOAD_MAX_MB_DEFAULT = "25"
 
 ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar(
@@ -208,6 +209,17 @@ ENV_VARS: tuple[EnvVar, ...] = (
             "(issue #73; agent/sandbox.py writes data/sandboxes/<id>.db). "
             "Empty or unset means no active DB; agent/db.py then falls "
             "back to data/app.db."
+        ),
+    ),
+    EnvVar(
+        name="UPLOAD_MAX_MB",
+        default=_UPLOAD_MAX_MB_DEFAULT,
+        required=False,
+        purpose=(
+            "Size cap in megabytes for POST /data/upload CSV bodies "
+            "(issue #74; agent/server.py rejects larger files with 400 "
+            "before any write). Non-numeric or empty values fall back "
+            "to the default."
         ),
     ),
 )
