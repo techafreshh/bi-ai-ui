@@ -6,6 +6,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardCanvas } from "./DashboardCanvas";
+import { DEMO_LAYOUT } from "../lib/demoLayout";
 import {
   FakeAgent,
   getFakeAgent,
@@ -29,8 +30,20 @@ afterEach(() => {
 });
 
 describe("DashboardCanvas (acceptance 1)", () => {
-  it("renders exactly 6 registry-resolved catalog components, no fallback cards", () => {
+  it("renders the empty state by default with no dataset", () => {
     const { container } = render(<DashboardCanvas />);
+    expect(screen.getByTestId("empty-state")).toBeTruthy();
+    expect(
+      screen.getByText("No dataset loaded — upload CSV or load sample"),
+    ).toBeTruthy();
+    expect(container.querySelector('[data-testid="canvas-skeleton"]')).toBeNull();
+    expect(
+      container.querySelectorAll('[data-testid^="catalog-"]'),
+    ).toHaveLength(0);
+  });
+
+  it("renders exactly 6 registry-resolved catalog components, no fallback cards", () => {
+    const { container } = render(<DashboardCanvas layout={DEMO_LAYOUT} />);
     const resolved = container.querySelectorAll('[data-testid^="catalog-"]');
     expect(resolved).toHaveLength(6);
     expect(container.querySelector('[data-testid="a2ui-fallback"]')).toBeNull();
@@ -41,7 +54,7 @@ describe("DashboardCanvas (acceptance 1)", () => {
   });
 
   it("renders all six catalog testids", () => {
-    render(<DashboardCanvas />);
+    render(<DashboardCanvas layout={DEMO_LAYOUT} />);
     for (const type of [
       "kpi_row",
       "line_chart",
@@ -55,7 +68,7 @@ describe("DashboardCanvas (acceptance 1)", () => {
   });
 
   it("exposes the acceptance KPI formatted and the 92-point Q3 chart", () => {
-    render(<DashboardCanvas />);
+    render(<DashboardCanvas layout={DEMO_LAYOUT} />);
     expect(screen.getByText("$1.20M")).toBeTruthy();
     expect(screen.getByText("+18%")).toBeTruthy();
     expect(screen.getByTestId("line-chart").getAttribute("data-points")).toBe("92");
@@ -63,7 +76,7 @@ describe("DashboardCanvas (acceptance 1)", () => {
 
   it("carries the 50-row demo table with a working segment filter", async () => {
     const user = userEvent.setup();
-    render(<DashboardCanvas />);
+    render(<DashboardCanvas layout={DEMO_LAYOUT} />);
     expect(screen.getAllByTestId("data-table-row")).toHaveLength(50);
     await user.type(screen.getByRole("textbox", { name: "Filter segment" }), "Growth");
     const rows = screen.getAllByTestId("data-table-row");
@@ -142,7 +155,7 @@ describe("DashboardCanvas stream phases (acceptance 13)", () => {
   };
 
   it("shows the skeleton grid within the same tick as the run starts", () => {
-    const { container } = render(<DashboardCanvas />);
+    const { container } = render(<DashboardCanvas layout={DEMO_LAYOUT} />);
     expect(container.querySelector('[data-testid="canvas-skeleton"]')).toBeNull();
     act(() => {
       getFakeAgent().emitRunStarted();
@@ -153,7 +166,7 @@ describe("DashboardCanvas stream phases (acceptance 13)", () => {
   });
 
   it("renders live items with slot skeletons, then copy replaces them", () => {
-    const { container } = render(<DashboardCanvas />);
+    const { container } = render(<DashboardCanvas layout={DEMO_LAYOUT} />);
     act(() => {
       getFakeAgent().emitRunStarted();
       getFakeAgent().emitState({ a2ui: STREAMED });
@@ -181,7 +194,7 @@ describe("DashboardCanvas stream phases (acceptance 13)", () => {
   });
 
   it("degrades an invalid streamed envelope to the fallback card, not a stuck skeleton", () => {
-    const { container } = render(<DashboardCanvas />);
+    const { container } = render(<DashboardCanvas layout={DEMO_LAYOUT} />);
     act(() => {
       getFakeAgent().emitRunStarted();
       getFakeAgent().emitState({ a2ui: { v: 2 } });
@@ -190,8 +203,24 @@ describe("DashboardCanvas stream phases (acceptance 13)", () => {
     expect(container.querySelector('[data-testid="a2ui-fallback"]')).not.toBeNull();
   });
 
-  it("a run ending with no layout returns to the fixture canvas", () => {
+  it("a run ending with no layout returns to the empty canvas", () => {
     const { container } = render(<DashboardCanvas />);
+    act(() => {
+      getFakeAgent().emitRunStarted();
+    });
+    expect(container.querySelector('[data-testid="canvas-skeleton"]')).not.toBeNull();
+    act(() => {
+      getFakeAgent().emitRunFinalized();
+    });
+    expect(container.querySelector('[data-testid="canvas-skeleton"]')).toBeNull();
+    expect(screen.getByTestId("empty-state")).toBeTruthy();
+    expect(
+      container.querySelectorAll('[data-testid^="catalog-"]'),
+    ).toHaveLength(0);
+  });
+
+  it("a run ending with no layout returns to the passed fixture canvas", () => {
+    const { container } = render(<DashboardCanvas layout={DEMO_LAYOUT} />);
     act(() => {
       getFakeAgent().emitRunStarted();
     });
