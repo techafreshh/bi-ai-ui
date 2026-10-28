@@ -14,6 +14,7 @@ import argparse
 import logging
 import os
 import socket
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -33,13 +34,19 @@ else:
 import uvicorn  # noqa: E402
 from ag_ui_langgraph import add_langgraph_fastapi_endpoint  # noqa: E402
 from copilotkit import LangGraphAGUIAgent  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, File, Form, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 
 try:  # package-style entry (uvicorn agent.server:app from the repo root)
     from agent.graph import graph
 except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/)
     from graph import graph
+
+try:  # package-style entry (uvicorn agent.server:app from the repo root)
+    from agent.sandbox import ALLOWED_TABLES, load_bytes
+except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/)
+    from sandbox import ALLOWED_TABLES, load_bytes
 
 logger = logging.getLogger("bi-ai-ui.agent")
 
@@ -56,6 +63,27 @@ _NO_KEY_LOG = (
     "OPENROUTER_API_KEY is not set (agent/.env). /health keeps serving 200, "
     "but chat requests will fail until a key is provided."
 )
+
+# Fallback string for UPLOAD_MAX_MB (issue #74): decimal megabytes capping
+# POST /data/upload bodies, mirrored from config.py's registry row. Read
+# per request (never import time) so tests and operators can retune it via
+# the environment without reimporting the server.
+_UPLOAD_MAX_MB_FALLBACK = "25"
+
+
+def _upload_max_bytes():
+    """Byte cap for upload bodies: UPLOAD_MAX_MB decimal megabytes.
+
+    Non-numeric or empty values fall back to the default instead of 500ing
+    the upload (the env-contract tests pin the same fallback in config.py
+    and agent/.env.example)."""
+    raw = os.getenv("UPLOAD_MAX_MB", _UPLOAD_MAX_MB_FALLBACK)
+    if not raw or not raw.strip():
+        raw = _UPLOAD_MAX_MB_FALLBACK
+    try:
+        return int(float(raw) * 1024 * 1024)
+    except (TypeError, ValueError):
+        return int(float(_UPLOAD_MAX_MB_FALLBACK) * 1024 * 1024)
 
 def create_app() -> FastAPI:
     app = FastAPI(title="bi-ai-ui agent")
@@ -74,6 +102,54 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    # Analyst CSV landing (issue #74): multipart `file` + `table`. Everything
+    # is validated in memory — table allowlist, UPLOAD_MAX_MB size cap,
+    # exact-header allowlist and strict int/ISO-date coercion — before
+    # sandbox.py creates any file, so every 400 leaves no `.db` behind.
+    # Later reads go through db.connect_ro() against the returned sandbox
+    # id; the upload itself never touches DB_PATH (activation is a later
+    # issue).
+    @app.post("/data/upload", status_code=201)
+    async def upload(
+        file: UploadFile | None = File(None),
+        table: str | None = Form(None),
+    ):
+        if table not in ALLOWED_TABLES:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"unknown table {table!r}; must be one of "
+                        f"{sorted(ALLOWED_TABLES)}"
+                    )
+                },
+            )
+        raw = await file.read() if file is not None else b""
+        max_bytes = _upload_max_bytes()
+        if len(raw) > max_bytes:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"file too large: {len(raw)} bytes exceeds "
+                        f"the {max_bytes}-byte upload limit"
+                    )
+                },
+            )
+        try:
+            # load_bytes decodes UTF-8 (fallback: 400 below) and validates
+            # the whole body before creating the sandbox file.
+            dataset_id = uuid.uuid4().hex
+            _dest, rows, data_end = load_bytes(table, raw, dataset_id)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        return {
+            "id": dataset_id,
+            "table": table,
+            "rows": rows,
+            "data_end": data_end,
+        }
 
     # Honest-empty dataset contract (issue #71): no registry yet (#70
     # fills this in) — with no active dataset report null + empty list

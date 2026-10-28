@@ -13,13 +13,17 @@ via `int()` (empty string reads NULL only for the nullable `units`
 column, otherwise ValueError), date columns are canonicalized through the
 `queries.py:_require_date` idiom (`date.fromisoformat`, ValueError on bad
 input), and an unknown table/header or an empty file raises ValueError
-without creating any `.db` file.
+(header mismatches name the `unknown column`, empty inputs say `empty`)
+without creating any `.db` file. `load_bytes` offers the same validation
+for in-memory uploads (issue #74) and additionally returns the row count
+and the max date (`data_end`) for the upload response.
 
 Stdlib only: `csv`, `re`, `sqlite3` and `pathlib`, so importing this module
 never touches the agent's model dependencies.
 """
 
 import csv
+import io
 import re
 import sqlite3
 from datetime import date
@@ -83,6 +87,11 @@ _DATE_COLUMNS = {
     "revenue_events": frozenset({"event_date"}),
     "usage_events": frozenset({"event_date"}),
 }
+
+# Public allowlist of uploadable tables: POST /data/upload (issue #74)
+# checks the multipart `table` field against this so the route and the
+# loader cannot drift apart.
+ALLOWED_TABLES = tuple(_TABLE_COLUMNS)
 
 # The full four-table schema plus the three event_date indexes, copied
 # verbatim from scripts/generate_data.py:SCHEMA_SQL (the single source of
@@ -171,6 +180,78 @@ def _coerce_value(table, column, value):
     return value
 
 
+def _parse_text(table, text, label):
+    """Validate CSV `text` for `table` and return `(rows, data_end)`.
+
+    `table` must name a known schema table and the header must equal its
+    columns exactly — any other header raises ValueError naming the
+    `unknown column`. Empty input (no content, no header row, or a header
+    with zero data rows) raises ValueError saying `empty`. Every data cell
+    is strictly coerced via `_coerce_value`; `data_end` is the max ISO
+    value of the table's date column (`created_at` for accounts,
+    `event_date` otherwise). Pure validation and coercion: no I/O, so a
+    400 never leaves a file behind."""
+    _require_table(table)
+    columns = _TABLE_COLUMNS[table]
+    if not text.strip():
+        raise ValueError(f"{label} is empty: no content received")
+    reader = csv.reader(io.StringIO(text))
+    header = next(reader, None)
+    if header is None:
+        raise ValueError(f"{label} is empty: missing header row")
+    if tuple(header) != columns:
+        raise ValueError(
+            f"{label} header {header!r} has unknown column "
+            f"for table {table!r}: expected columns {list(columns)!r}"
+        )
+    rows = []
+    for record in reader:
+        if len(record) != len(columns):
+            raise ValueError(
+                f"{label} row {reader.line_num} has {len(record)} "
+                f"fields, expected {len(columns)}"
+            )
+        rows.append(
+            tuple(
+                _coerce_value(table, column, value)
+                for column, value in zip(columns, record)
+            )
+        )
+    if not rows:
+        raise ValueError(f"{label} holds no data rows: empty file")
+    date_column = next(iter(_DATE_COLUMNS[table]))
+    date_index = columns.index(date_column)
+    data_end = max(row[date_index] for row in rows)
+    return rows, data_end
+
+
+def load_bytes(table, raw, dataset_id, sandbox_dir=None):
+    """Import one CSV table from in-memory `raw` (issue #74).
+
+    `raw` is the uploaded body's bytes (a `str` is accepted too); it is
+    decoded as UTF-8 — undecodable input raises ValueError — then fully
+    validated through `_parse_text` BEFORE any file is created, so every
+    client failure (empty body, unknown column, bad ISO date, bad
+    integer) raises ValueError with no `.db` file left behind. On success
+    the full four-table schema plus the three `event_date` indexes is
+    written to a fresh `<sandbox_dir>/<dataset_id>.db` and
+    `(sandbox path, row count, data_end)` is returned for the 201 body."""
+    _require_dataset_id(dataset_id)
+    _require_table(table)
+    if raw is None or (not isinstance(raw, str) and len(bytes(raw)) == 0):
+        raise ValueError("upload is empty: no content received")
+    if isinstance(raw, str):
+        text = raw
+    else:
+        try:
+            text = bytes(raw).decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("upload is not valid UTF-8") from None
+    rows, data_end = _parse_text(table, text, "upload")
+    dest = load_table(table, rows, dataset_id, sandbox_dir)
+    return dest, len(rows), data_end
+
+
 def load_table(table, rows, dataset_id, sandbox_dir=None):
     """Write already-coerced `rows` (a list of tuples in the table's column
     order) into a fresh `data/sandboxes/<dataset_id>.db` carrying the full
@@ -226,32 +307,11 @@ def load_csv(csv_path, dataset_id, table=None, sandbox_dir=None):
     resolved_table = _require_table(
         table if table is not None else source.stem
     )
-    columns = _TABLE_COLUMNS[resolved_table]
-    with open(source, newline="", encoding="utf-8") as handle:
-        reader = csv.reader(handle)
-        header = next(reader, None)
-        if header is None:
-            raise ValueError(f"{source} is empty: missing header row")
-        if tuple(header) != columns:
-            raise ValueError(
-                f"{source} header {header!r} does not match "
-                f"table {resolved_table!r} columns {list(columns)!r}"
-            )
-        rows = []
-        for record in reader:
-            if len(record) != len(columns):
-                raise ValueError(
-                    f"{source} row {reader.line_num} has {len(record)} "
-                    f"fields, expected {len(columns)}"
-                )
-            rows.append(
-                tuple(
-                    _coerce_value(resolved_table, column, value)
-                    for column, value in zip(columns, record)
-                )
-            )
-    if not rows:
-        raise ValueError(f"{source} holds no data rows")
+    try:
+        text = source.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"{source} is not valid UTF-8") from None
+    rows, _ = _parse_text(resolved_table, text, str(source))
     return load_table(resolved_table, rows, dataset_id, sandbox_dir)
 
 
