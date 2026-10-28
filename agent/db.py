@@ -9,9 +9,11 @@ foreign-key enforcement, busy timeout — are defined in exactly one place.
 Issue #73 adds the sandbox half: uploads and samples live as isolated
 per-dataset files under repo-root `data/sandboxes/<id>.db`, and the single
 active one is resolved from the `DB_PATH` environment variable (empty
-means no active DB). `connect()` defaults to that active path so existing
-callers need no edits; `connect_ro()` opens the active path read-only so
-queries can never escape their sandbox.
+means no active DB), with the issue #75 in-memory dataset registry
+(`agent/datasets.py`, moved by `POST /data/active`) winning when set.
+`connect()` defaults to that active path so existing callers need no
+edits; `connect_ro()` opens the active path read-only so queries can
+never escape their sandbox.
 
 Stdlib only: `sqlite3`, `os` and `pathlib`, so importing this module never
 touches the agent's model dependencies and works under the bare system
@@ -30,6 +32,27 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "app.db"
 # Home of the per-dataset sandbox files (`agent/sandbox.py` writes
 # `<id>.db` here); same from-`__file__` anchoring as DEFAULT_DB_PATH.
 SANDBOX_DIR = Path(__file__).resolve().parents[1] / "data" / "sandboxes"
+
+
+def _registry_active_path():
+    """Active sandbox path from the issue #75 in-memory registry (None when
+    no dataset is active or the registry module is unavailable). The
+    import rides inside the function — with the dual package/script idiom
+    the rest of the agent uses — so `db.py` stays import-cycle-free
+    (`datasets.py` itself is stdlib-only and never imports back). Any
+    registry failure reads as "no active dataset" and falls through to
+    the `DB_PATH` path below, never 500ing a connection."""
+    try:
+        try:  # package-style entry (import agent.db from the repo root)
+            from agent import datasets
+        except ModuleNotFoundError:  # script-style (import db from agent/)
+            import datasets  # type: ignore[no-redef]
+    except ImportError:
+        return None
+    try:
+        return datasets.active_path()
+    except Exception:  # noqa: BLE001 - registry trouble means "no active"
+        return None
 
 
 def get_active_path():
@@ -52,7 +75,8 @@ def connect(db_path=None, *, readonly=False):
     """Open a connection to the app database.
 
     db_path: filesystem path of the database; when None (the default) the
-        active `DB_PATH` sandbox is used if one is set, else DEFAULT_DB_PATH.
+        active issue #75 dataset is used if one is set, else the active
+        `DB_PATH` sandbox if one is set, else DEFAULT_DB_PATH.
     readonly: open with SQLite's `mode=ro` URI so writes fail loudly instead
         of silently creating a second database file.
 
@@ -62,7 +86,9 @@ def connect(db_path=None, *, readonly=False):
     during a generation run queue instead of erroring.
     """
     if db_path is None:
-        db_path = get_active_path()
+        db_path = _registry_active_path()
+        if db_path is None:
+            db_path = get_active_path()
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     if readonly:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10.0)
