@@ -14,11 +14,10 @@ status, snapshot, messages) — tracked independently, last-wins-on-present,
 exactly like the browser's useA2UI/useDecisions hooks. Every query runs
 on a fresh threadId so runs never share state.
 
-Readiness: /health answers instantly at boot while the demo database is
-still seeding in the background (server.py self-seeds data/app.db); a
-run during the seeding window degrades instead of failing. So after the
-ports answer, the script re-runs the Q3 query until its snapshot reads
-degraded=False before the counted checks start.
+Readiness: /health answers instantly at boot (boot is empty by default —
+no seeding runs, issue #71). The script runs each query once the ports
+answer; dataset-dependent probes expect an explicitly loaded database
+(see scripts/reset_data.sh).
 
 Exit code: 0 when every check passes, 1 otherwise. Output is a per-check
 [ok]/[FAIL] report plus a summary line.
@@ -43,7 +42,6 @@ OFF_CATALOG_QUERY = "draw me a dragon"
 
 STACK_TIMEOUT_S = float(os.getenv("VERIFY_STACK_TIMEOUT_S", "300"))
 QUERY_TIMEOUT_S = float(os.getenv("VERIFY_QUERY_TIMEOUT_S", "180"))
-READINESS_ATTEMPTS = int(os.getenv("VERIFY_READINESS_ATTEMPTS", "6"))
 
 CHECKS = []
 
@@ -178,31 +176,6 @@ def run_query_sse(query, timeout=QUERY_TIMEOUT_S):
         "snapshot": merged.get("snapshot"),
         "messages": merged.get("messages"),
     }
-
-
-def wait_for_seed():
-    """Re-run the Q3 query until its snapshot is seeded (degraded=False)
-    and carries a kpi_row, or raise RuntimeError after READINESS_ATTEMPTS."""
-    last = None
-    for attempt in range(1, READINESS_ATTEMPTS + 1):
-        try:
-            result = run_query_sse(Q3_QUERY)
-        except RuntimeError as exc:
-            last = str(exc)
-            time.sleep(10)
-            continue
-        snapshot = result.get("snapshot") or {}
-        items = (result.get("a2ui") or {}).get("items") or []
-        types = {item.get("type") for item in items if isinstance(item, dict)}
-        if snapshot.get("degraded") is False and "kpi_row" in types:
-            return result
-        last = "attempt %d: degraded=%r types=%s" % (
-            attempt,
-            snapshot.get("degraded"),
-            sorted(types),
-        )
-        time.sleep(10)
-    raise RuntimeError("database never finished seeding: %s" % last)
 
 
 def items_by_type(a2ui):
@@ -435,15 +408,8 @@ def main():
         return 1
     print("[ok] stack ready: agent + web answer")
 
-    try:
-        RUNS["q3"] = wait_for_seed()
-    except RuntimeError as exc:
-        print(f"[FAIL] seed readiness: {exc}")
-        print("0/1 checks passed")
-        return 1
-    print("[ok] seed readiness: Q3 run is seeded (kpi_row streamed)")
-
     for name, query in (
+        ("q3", Q3_QUERY),
         ("churn", CHURN_QUERY),
         ("dq", DQ_QUERY),
         ("off_catalog", OFF_CATALOG_QUERY),

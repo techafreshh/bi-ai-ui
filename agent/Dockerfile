@@ -14,7 +14,7 @@ RUN uv sync --frozen --no-install-project
 
 COPY . .
 
-# Boot entrypoint (issue #70): DB-less boot, no seeding — just execs CMD.
+# Boot entrypoint (issues #70, #71): no-seed passthrough — just execs CMD.
 # The generator stays available for manual runs. No secrets here.
 RUN chmod +x /app/docker-entrypoint.sh
 
