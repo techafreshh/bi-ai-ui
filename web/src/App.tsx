@@ -2,12 +2,14 @@ import { CopilotKitProvider } from "@copilotkit/react-core/v2";
 import { HttpAgent } from "@ag-ui/client";
 import "@copilotkit/react-core/v2/styles.css";
 import { DashboardCanvas } from "./components/DashboardCanvas";
+import { DatasetPicker } from "./components/datasets/DatasetPicker";
 import { DecisionDrawer } from "./components/DecisionDrawer";
 import { ThemeToggle } from "./components/ui/theme-toggle";
 import { ChatSidebar } from "./components/ui/chat/ChatSidebar";
 import { useDecisions } from "./hooks/useDecisions";
 import { InvestigateProvider } from "./hooks/useInvestigate";
 import { ThemeProvider } from "./lib/theme";
+import { useState } from "react";
 import { AGENT_ID, AGENT_URL } from "./lib/agent";
 
 const biAgent = new HttpAgent({ agentId: AGENT_ID, url: AGENT_URL });
@@ -17,6 +19,9 @@ const biAgent = new HttpAgent({ agentId: AGENT_ID, url: AGENT_URL });
 // decision log accumulates here and the drawer mounts at the header's right.
 function AppShell() {
   const decisions = useDecisions(AGENT_ID);
+  // Refreshed by the canvas empty state after a successful upload or
+  // sample load so the header picker shows the newly active dataset.
+  const [datasetRefresh, setDatasetRefresh] = useState(0);
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
@@ -29,6 +34,7 @@ function AppShell() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <DatasetPicker refreshKey={datasetRefresh} />
           <DecisionDrawer decisions={decisions} />
           <ThemeToggle />
         </div>
@@ -38,7 +44,9 @@ function AppShell() {
           sidebar chats on, so the drill-down lands on the visible thread. */}
       <InvestigateProvider agentId={AGENT_ID}>
         <main className="flex-1 p-8">
-          <DashboardCanvas />
+          <DashboardCanvas
+            onLoaded={() => setDatasetRefresh((count) => count + 1)}
+          />
         </main>
       </InvestigateProvider>
       <ChatSidebar />
