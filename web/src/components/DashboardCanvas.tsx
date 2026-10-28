@@ -20,7 +20,7 @@ import { useA2UI, slotCopyOf } from "../hooks/useA2UI";
 import { A2UIRenderer } from "./catalog/A2UIRenderer";
 import { CatalogSizeProvider } from "./catalog/catalogSize";
 import { SlotCopyProvider } from "./catalog/slotCopy";
-import { EmptyState } from "./EmptyState";
+import { EmptyState } from "./datasets/EmptyState";
 import { Skeleton } from "./ui/skeleton";
 
 function CanvasSkeleton() {
@@ -42,8 +42,12 @@ function CanvasSkeleton() {
 export function DashboardCanvas({
   // Explicit layout (a loaded dataset); omitted means no dataset.
   layout,
+  // Bubbled by the empty state after a successful upload/sample load so
+  // the App shell can refresh the header picker.
+  onLoaded,
 }: {
   layout?: unknown;
+  onLoaded?: () => void;
 }) {
   const { a2ui, phase } = useA2UI(AGENT_ID);
 
@@ -96,7 +100,7 @@ export function DashboardCanvas({
         data-testid="dashboard-canvas"
         className="mx-auto flex w-full max-w-6xl flex-col gap-4"
       >
-        <EmptyState />
+        <EmptyState onLoaded={onLoaded} />
       </section>
     </CatalogSizeProvider>
   );

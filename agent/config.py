@@ -53,6 +53,7 @@ _SPA_ORIGIN_DEFAULT = "http://localhost:5173"
 _AGENT_HOST_DEFAULT = "0.0.0.0"
 _AGENT_PORT_DEFAULT = "8123"
 _UPLOAD_MAX_MB_DEFAULT = "25"
+_SAMPLES_DIR_DEFAULT = ""
 
 ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar(
@@ -220,6 +221,17 @@ ENV_VARS: tuple[EnvVar, ...] = (
             "(issue #74; agent/server.py rejects larger files with 400 "
             "before any write). Non-numeric or empty values fall back "
             "to the default."
+        ),
+    ),
+    EnvVar(
+        name="SAMPLES_DIR",
+        default=_SAMPLES_DIR_DEFAULT,
+        required=False,
+        purpose=(
+            "Directory POST /data/sample reads its four CSVs from "
+            "(issue #76; docker-compose mounts repo-root samples/ at "
+            "/samples). Empty or unset means the repo-root samples/ "
+            "dir anchored from agent/server.py."
         ),
     ),
 )

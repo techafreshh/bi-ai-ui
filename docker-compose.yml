@@ -19,12 +19,20 @@ services:
     environment:
       # Browser origin allowed by CORS; must match where the SPA is served.
       SPA_ORIGIN: ${SPA_ORIGIN:-http://localhost:5173}
+      # Issue #76: the server-side sample miniature reads its CSVs from
+      # this container path (read-only mount below); host/CI keeps the
+      # __file__-anchored repo-root samples/ default by leaving it unset.
+      SAMPLES_DIR: /samples
     # agent/db.py:DEFAULT_DB_PATH resolves from the file location, never
     # the cwd: parents[1]/data/app.db. In-container db.py is /app/db.py
     # (WORKDIR /app), so the path is /data/app.db — this bind mount is for
     # future sandbox datasets only (issue #71); boot itself never creates one.
     volumes:
       - ./data:/data
+      # Issue #76: the agent image build context is ./agent and cannot bake
+      # the repo-root samples/ in — mount them read-only for POST
+      # /data/sample instead of committing a second copy under web/public.
+      - ./samples:/samples:ro
     entrypoint: ["/app/docker-entrypoint.sh"]
     command: ["uv", "run", "--no-sync", "python", "server.py"]
     # Stdlib-only probe (no new packages): same {"status": "ok"} contract
