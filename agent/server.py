@@ -5,6 +5,9 @@ agent/main.py: load .env first, build the app, self-defined /health that
 returns exactly {"status": "ok"}, then the AG-UI endpoint. Boot is
 DB-less by contract (issue #70): no seeder runs here, /health never waits
 on a database, and read_state degrades when data/app.db is absent.
+Boot is empty by default (issue #71): no automatic seeding of any kind
+runs at boot — with no active dataset GET /data/datasets reports
+{"active_id": None, "datasets": []}.
 """
 
 import argparse
@@ -71,6 +74,13 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    # Honest-empty dataset contract (issue #71): no registry yet (#70
+    # fills this in) — with no active dataset report null + empty list
+    # so empty is an explicit state instead of zeros-as-data.
+    @app.get("/data/datasets")
+    async def datasets():
+        return {"active_id": None, "datasets": []}
 
     add_langgraph_fastapi_endpoint(
         app=app,

@@ -27,6 +27,22 @@ def test_health_returns_exact_contract():
     assert response.json() == {"status": "ok"}
 
 
+def test_datasets_empty_contract():
+    """Issue #71: with no active dataset GET /data/datasets is 200 with
+    exactly {"active_id": None, "datasets": []} — empty is explicit."""
+    response = client.get("/data/datasets")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"active_id": None, "datasets": []}
+
+
+def test_no_seed_paths_at_import():
+    """Issue #71: the server module exposes no seeder callables/events —
+    no background thread, entrypoint seed, RESEED, or seed-wait at boot."""
+    for name in ("wait_for_seed", "_ensure_seed_database", "_seed_database_worker"):
+        assert not hasattr(server_module, name), f"server must not expose {name}"
+    assert "RESEED" not in dir(server_module)
+
+
 def test_health_with_no_dataset_boot(monkeypatch, tmp_path):
     """Issue #70: a missing data/app.db is the normal empty state — build a
     fresh app with the DB default pointed at a nonexistent path and /health
