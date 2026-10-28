@@ -43,3 +43,18 @@ head -1 samples/accounts.csv  # id,name,segment,plan,arr_cents,created_at
 du -cb samples/*.csv          # total must stay under 1048576 bytes
 sha256sum -c samples/sha256sums.txt
 ```
+
+## Full-scale parity and release assets
+
+These four CSVs mirror `--profile seeded` at reviewer scale versus the
+generator's full ~2.9M-row scale: same schema column order, same money-as-cents
+/ dates-as-TEXT conventions, same repriced-churn semantics (Growth accounts
+created before the window, upgraded Growth→Scale, then zero-delta `cancel`
+markers inside one window with tenures over six months) and same Startup-only
+ingest-bug semantics (exact `(account_id,event_date,metric,units)` duplicates
+plus NULL `units` confined to one window, corruption-free elsewhere), with
+`accounts.arr_cents == SUM(arr_delta_cents)` holding per account in both.
+The full-scale equivalent is `python agent/scripts/generate_data.py --db-path
+./data/sandboxes/<id>.db --profile seeded`; `--profile random --seed N` draws
+the unplanted variant. Full-scale CSVs/SQLite ship as release assets only,
+never as committed blobs.

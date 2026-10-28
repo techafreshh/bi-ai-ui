@@ -654,3 +654,72 @@ class TestRandomProfile:
         assert shapes["spike_count"] == 40
         assert shapes["organic_count"] == 0
         assert shapes["spike_start"] == "2026-08-10"
+
+
+class TestReproducerContract:
+    """Issue #90 reproducer contract: generate_data.py is the documented
+    full-scale reproducer. --help advertises --db-path/--profile/--seed, a
+    seeded run to --db-path builds the full planted-invariant DB, and a
+    random --seed 7 run to a second path draws a different churn cohort
+    (different subscription_events COUNT). Both DBs are generated once per
+    class and shared, mirroring the session `generated` fixture pattern."""
+
+    @pytest.fixture(scope="class")
+    def reproducer_dbs(self, tmp_path_factory):
+        """Seeded DB plus random-seed-7 DB, each generated once."""
+        tmp = tmp_path_factory.mktemp("reproducer_contract")
+        seeded_db = tmp / "seeded.db"
+        random_db = tmp / "random.db"
+        TestRandomProfile._run(seeded_db, 7, profile="seeded")
+        TestRandomProfile._run(random_db, 7, profile="random")
+        return seeded_db, random_db
+
+    def test_help_lists_reproducer_flags(self):
+        """Acceptance: --help shows --db-path, --profile and --seed."""
+        result = subprocess.run(
+            [sys.executable, str(GENERATOR), "--help"],
+            cwd=AGENT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 0
+        assert "--db-path" in result.stdout
+        assert "--profile" in result.stdout
+        assert "--seed" in result.stdout
+
+    def test_seeded_db_path_builds_full_scale_db(self, reproducer_dbs):
+        """Acceptance: --db-path with --profile seeded creates the file
+        with a full-scale subscription_events table (>1000 rows)."""
+        seeded_db, _random_db = reproducer_dbs
+        assert seeded_db.exists()
+        conn = db.connect(seeded_db, readonly=True)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM subscription_events"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count > 1000
+
+    def test_random_seed_7_churn_cohort_differs(self, reproducer_dbs):
+        """Acceptance: --profile random --seed 7 to a different path
+        draws a different churn cohort than the seeded run (different
+        subscription_events COUNT)."""
+        seeded_db, random_db = reproducer_dbs
+        assert random_db.exists()
+        conn = db.connect(seeded_db, readonly=True)
+        try:
+            seeded_count = conn.execute(
+                "SELECT COUNT(*) FROM subscription_events"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        conn = db.connect(random_db, readonly=True)
+        try:
+            random_count = conn.execute(
+                "SELECT COUNT(*) FROM subscription_events"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert seeded_count != random_count
