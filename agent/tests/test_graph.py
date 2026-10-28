@@ -12,6 +12,8 @@ swap-restore per consumer).
 
 import asyncio
 import json
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -728,3 +730,44 @@ def test_threshold_env_routes_the_layout_cut(seeded_db, monkeypatch):
     # low-threshold run flagged the two endorsed picks above it.
     high_flags = _final_state(high_snapshots)["decisions"]
     assert high_flags and all(not d["above_threshold"] for d in high_flags)
+
+
+def test_pipeline_composes_ui_from_random_db(tmp_path, monkeypatch):
+    """The sample-dataset workflow (issue: test with real-ish data): the
+    full pipeline — read_state → decide → layout → query → fill — runs over
+    a random-profile DB the agent was never staged for. 'Show me sales in
+    Q3' still resolves the window from that data's own latest day (the
+    random profile ends 2026-09-30, so the same exact Q3 range) and streams
+    a threshold-endorsed kpi_row + line_chart, with every streamed a2ui
+    passing layout validation — proving the pipeline adapts to data it was
+    never choreographed against."""
+    random_db = tmp_path / "random.db"
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1]
+         / "scripts" / "generate_data.py"),
+         "--db-path", str(random_db),
+         "--profile", "random", "--seed", "5"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+
+    with_db = db.DEFAULT_DB_PATH
+    db.DEFAULT_DB_PATH = random_db
+    try:
+        raw, snapshots = _run_sse(monkeypatch)
+    finally:
+        db.DEFAULT_DB_PATH = with_db
+
+    assert "RUN_FINISHED" in raw
+    final = _final_state(snapshots)
+    assert final["snapshot"]["window"]["range"] == Q3_RANGE
+    items = final["a2ui"]["items"]
+    kpi_rows = [item for item in items if item["type"] == "kpi_row"]
+    charts = [item for item in items if item["type"] == "line_chart"]
+    assert len(kpi_rows) >= 1 and len(charts) >= 1, items
+    assert charts[0]["props"]["range"] == Q3_RANGE
+    for a2ui in _emitted_a2ui(snapshots):
+        catalog.A2UILayout.model_validate(a2ui)

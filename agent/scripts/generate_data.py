@@ -3,9 +3,30 @@
 Running `python agent/scripts/generate_data.py` creates `data/app.db`
 (gitignored) with mock B2B-SaaS data covering the 24 months ending
 2026-09-30: ~5–8k accounts plus daily subscription / revenue / usage event
-tables, all reproducible from one fixed seed — running the script twice
-yields identical per-table row counts and identical total revenue to the
-cent. Three shapes are planted deterministically:
+tables, all reproducible from one fixed seed — running the script twice with
+the same flags yields identical per-table row counts and identical total
+revenue to the cent.
+
+Two profiles select WHICH shapes are planted (`--profile`, `--seed`):
+
+  * `--profile seeded` (default): the three choreographed demo shapes
+    below, always from the fixed module SEED — --seed is accepted but
+    IGNORED here, so the default output is byte-identical to the PRD's demo
+    contract no matter what it is set to (the README script, the golden
+    tests and verify_demo.py all pin it, so the default output must never
+    drift).
+  * `--profile random`: a same-period dataset WITHOUT choreographed shapes
+    — organic new-account counts, a randomly placed repricing churn spike
+    (Jun 1–Sep 16 2026, any segment, 15–45 accounts), a light organic churn
+    tail (10–30 cancels scattered before June 2026 so the baseline is
+    nonzero), and a randomly placed ingest bug (14 days inside Jul–Sep 2026,
+    any segment, ~12–20% duplicate + ~5–8% null shares). `--seed` picks the
+    shapes; the same seed always rebuilds the identical dataset. This
+    profile is the test harness for "does the agent compose UI from data it
+    was never staged for?" — verify_demo.py's planted-shape probes do NOT
+    apply to it.
+
+Seeded profile's three shapes (the default, issues #3 and #4):
 
   1. Q3 growth ramp (issue #3): an Aug-1-2026 go-to-market campaign is
      baked in as pinned monthly new-account counts, producing strong
@@ -73,13 +94,17 @@ shifting the ≈$1.9M Sep−Aug step margin by at most ≈$0.23M — the Q3
 monotonicity contract keeps holding by wide margin.
 
 Determinism is structural, not hoped for: all randomness flows through ONE
-`random.Random(SEED)` passed to pure builders that consume draws in a fixed
-order (monthly counts → per-account plan/segment/day/name → monthly
-upgrade picks → churn cohort picks and cancel/upgrade dates → usage draws,
-with ingest-bug rolls interleaved per in-window Startup row). New draws
-join only at the end of that chain, never above existing ones. No
-module-global `random`, no iteration over sets (PYTHONHASHSEED
-independence), sequential ids, integer-only money math.
+`random.Random(seed)` (seed from --seed, default the fixed SEED) passed to
+pure builders that consume draws in a fixed order (monthly counts →
+per-account plan/segment/day/name → monthly upgrade picks → churn cohort
+picks and cancel/upgrade dates → usage draws, with ingest-bug rolls
+interleaved per in-window segment row). The random profile draws its shape
+parameters first (spike start/segment/count, organic-cancel count, bug
+window/segment/shares) and then runs the same chain; the profile changes
+the shape parameters, never the draw order. New draws join only at the end
+of that chain, never above existing ones. No module-global `random`, no
+iteration over sets (PYTHONHASHSEED independence), sequential ids,
+integer-only money math.
 """
 
 import argparse
@@ -150,6 +175,34 @@ USAGE_BUG_SEGMENT = "Startup"
 USAGE_BUG_DUPLICATE_SHARE = 0.15
 USAGE_BUG_NULL_SHARE = 0.06
 
+# Random profile (--profile random): the same period, organic shapes. The
+# churn spike may start any day in RANDOM_SPIKE_EARLIEST..RANDOM_SPIKE_
+# LATEST_START (so the window always spans ≥14 days to data end) with any
+# segment and RANDOM_SPIKE_COUNT_RANGE accounts; its repricing upgrade
+# precedes each cancel by ≤ RANDOM_UPGRADE_BACK_DAYS (a realistic
+# repriced-then-cancelled signature, and the same one _churn_cause reads).
+# The light organic churn tail (RANDOM_ORGANIC_CANCEL_COUNT cancels before
+# RANDOM_ORGANIC_LAST_DAY, no paired upgrade) keeps the churn baseline
+# nonzero so the variance callout measures against a real baseline. The
+# bug window spans RANDOM_BUG_DAYS ending by data end, inside Jul 2026 or
+# later so quality.recent_problem_scope's trailing-120 lookback finds it;
+# shares mirror the seeded bug's corruption bands.
+RANDOM_NEW_COUNT_RANGE = (180, 320)
+RANDOM_SPIKE_EARLIEST = date(2026, 6, 1)
+RANDOM_SPIKE_LATEST_START = date(2026, 9, 16)
+RANDOM_SPIKE_COUNT_RANGE = (15, 45)
+RANDOM_UPGRADE_BACK_DAYS = 14
+RANDOM_ORGANIC_CANCEL_COUNT = (10, 30)
+RANDOM_ORGANIC_LAST_DAY = date(2026, 5, 31)
+RANDOM_ORGANIC_MIN_AGE_DAYS = 30
+RANDOM_BUG_DAYS = 14
+RANDOM_BUG_EARLIEST = date(2026, 7, 1)
+RANDOM_BUG_LATEST_START = date(2026, 9, 17)
+RANDOM_DUP_SHARE_RANGE = (0.12, 0.20)
+RANDOM_NULL_SHARE_RANGE = (0.05, 0.08)
+
+PROFILES = ("seeded", "random")
+
 NAME_PREFIXES = ("Azure", "Borealis", "Cinder", "Dune", "Ember", "Fjord", "Grove", "Halcyon")
 NAME_SUFFIXES = (
     "Nanometrics", "Dynamics", "Labs", "Systems", "Works",
@@ -197,18 +250,22 @@ CREATE INDEX idx_usage_events_event_date ON usage_events(event_date);
 """
 
 
-def plan_months(rng):
+def plan_months(rng, *, campaign_counts=CAMPAIGN_MONTH_COUNTS,
+                baseline_range=BASELINE_NEW_COUNT_RANGE):
     """Return [(month_key, new_count)] for the 24 covered months.
 
-    Campaign months take pinned CAMPAIGN_MONTH_COUNTS (no draw); baseline
-    months draw inside BASELINE_NEW_COUNT_RANGE, in chronological order.
+    Campaign months take pinned counts (no draw) when campaign_counts is
+    given — the seeded profile's CAMPAIGN_MONTH_COUNTS; the random profile
+    passes None, so every month draws inside baseline_range in
+    chronological order. The defaults reproduce the planted profile's draw
+    sequence exactly.
     """
     plan = []
     year, month = FIRST_YEAR, FIRST_MONTH_NUM
     for _ in range(MONTHS_COVERED):
         key = f"{year:04d}-{month:02d}"
-        pinned = CAMPAIGN_MONTH_COUNTS.get(key)
-        count = pinned if pinned is not None else rng.randint(*BASELINE_NEW_COUNT_RANGE)
+        pinned = campaign_counts.get(key) if campaign_counts else None
+        count = pinned if pinned is not None else rng.randint(*baseline_range)
         plan.append((key, count))
         month += 1
         if month > 12:
@@ -314,39 +371,63 @@ def build_accounts(rng, plan):
     return accounts, subscription_events
 
 
-def apply_churn(rng, accounts, subscription_events):
-    """Plant the Aug-2026 pricing-change churn spike (issue #4).
+def apply_churn(rng, accounts, subscription_events, *, segment="Growth",
+                window_start=CHURN_WINDOW_START, window_end=CHURN_WINDOW_END,
+                count=CHURNED_ACCOUNT_COUNT,
+                candidate_cutoff=CHURN_CANDIDATE_CREATED_THROUGH,
+                upgrade_back_days=None):
+    """Plant a repricing churn spike (issue #4's seeded shape; the keyword
+    defaults reproduce it exactly, the random profile overrides them).
 
-    Candidates: Growth-segment accounts created on or before
-    CHURN_CANDIDATE_CREATED_THROUGH that still have a ladder rung above
-    (`plan in UPGRADE_DELTA_CENTS`), in id order — rng.sample over the list
-    picks exactly CHURNED_ACCOUNT_COUNT (no set iteration anywhere).
-    Per pick: draw the cancel date uniformly in the churn window, then the
-    paired "new plan" upgrade uniformly in [CHURN_WINDOW_START, cancel].
-    The upgrade event moves the account one rung up; the 'cancel' event
-    carries arr_delta_cents = 0 and is purely the churn marker — the
-    account row keeps its churn-time plan/ARR, so
-    accounts.arr_cents == SUM(arr_delta_cents) keeps holding verbatim.
+    Candidates: `segment`-segment accounts created on or before
+    candidate_cutoff that still have a ladder rung above (`plan in
+    UPGRADE_DELTA_CENTS`), in id order — rng.sample over the list picks
+    exactly count (no set iteration anywhere). Per pick: draw the cancel
+    date uniformly in [window_start, window_end], then the paired "new
+    plan" upgrade uniformly in [window_start, cancel] — or, when
+    upgrade_back_days is given (the random profile's realistic
+    repriced-days-before-cancelling signature), uniformly in
+    [cancel - upgrade_back_days, cancel]. The upgrade event moves the
+    account one rung up; the 'cancel' event carries arr_delta_cents = 0
+    and is purely the churn marker — the account row keeps its churn-time
+    plan/ARR, so accounts.arr_cents == SUM(arr_delta_cents) keeps holding
+    verbatim.
 
     Returns {account_id: cancel_date}; revenue and usage emission for these
     accounts stops (inclusive) on the cancel date.
     """
     candidates = [
         account for account in sorted(accounts, key=lambda item: item["id"])
-        if account["segment"] == "Growth"
+        if account["segment"] == segment
         and account["plan"] in UPGRADE_DELTA_CENTS  # a next rung must exist
-        and account["created_at"] <= CHURN_CANDIDATE_CREATED_THROUGH
+        and account["created_at"] <= candidate_cutoff
     ]
-    picked = rng.sample(candidates, CHURNED_ACCOUNT_COUNT)
+    picked = rng.sample(candidates, count)
     churn_dates = {}
     next_event_id = len(subscription_events) + 1
     for account in picked:
-        cancel_date = CHURN_WINDOW_START + timedelta(
-            days=rng.randint(0, (CHURN_WINDOW_END - CHURN_WINDOW_START).days)
+        cancel_date = window_start + timedelta(
+            days=rng.randint(0, (window_end - window_start).days)
         )
-        upgrade_date = CHURN_WINDOW_START + timedelta(
-            days=rng.randint(0, (cancel_date - CHURN_WINDOW_START).days)
+        back = (
+            upgrade_back_days
+            if upgrade_back_days is not None
+            else (cancel_date - window_start).days
         )
+        # The upgrade window is anchored so the drawn offset lands in
+        # [cancel - back, cancel]: the repriced-then-cancelled signature
+        # (≤ upgrade_back_days before cancelling) for the random profile —
+        # and, because the seeded profile's back spans the whole window, the
+        # historical [window_start, cancel] range there, keeping its output
+        # byte-identical. Clamped up to the account's creation day so the
+        # upgrade never precedes the account's own 'new' event (the random
+        # profile's candidates may be created just before the window).
+        upgrade_date = (cancel_date - timedelta(days=back)) + timedelta(
+            days=rng.randint(0, back)
+        )
+        created_day = date.fromisoformat(account["created_at"])
+        if upgrade_date < created_day:
+            upgrade_date = created_day
         old_plan = account["plan"]
         subscription_events.append((
             next_event_id, account["id"], upgrade_date.isoformat(),
@@ -359,6 +440,49 @@ def apply_churn(rng, accounts, subscription_events):
         next_event_id += 2
         account["plan"] = NEXT_PLAN[old_plan]
         account["arr_cents"] += UPGRADE_DELTA_CENTS[old_plan]
+        churn_dates[account["id"]] = cancel_date
+    return churn_dates
+
+
+def apply_organic_churn(rng, accounts, subscription_events, exclude_ids,
+                        total, last_day=RANDOM_ORGANIC_LAST_DAY):
+    """Scatter a light organic churn tail (random profile only).
+
+    `total` cancels (no paired upgrade — they must never read as the spike's
+    repricing signature) drawn uniformly among accounts created early enough
+    to age RANDOM_ORGANIC_MIN_AGE_DAYS past creation before `last_day`.
+    Cancel dates land between that age floor and `last_day`, which keeps
+    them strictly before the spike's earliest possible start (June 2026), so
+    the baseline months carry a real but unspectacular churn rate and the
+    spike month stands out against it. Account ids in `exclude_ids` (the
+    spike cohort) are skipped; retry-bounded like _unique_name so the draw
+    count stays bounded.
+
+    Returns {account_id: cancel_date} merged into the same churn_dates map
+    the spike produced — revenue and usage stop on the cancel date alike.
+    """
+    first_day = date(FIRST_YEAR, FIRST_MONTH_NUM, 1)
+    earliest = first_day + timedelta(days=RANDOM_ORGANIC_MIN_AGE_DAYS)
+    picked_ids = set(exclude_ids)
+    churn_dates = {}
+    next_event_id = len(subscription_events) + 1
+    attempts = 0
+    attempts_cap = NAME_ATTEMPTS * max(1, total)
+    while len(churn_dates) < total and attempts < attempts_cap:
+        attempts += 1
+        account = accounts[rng.randrange(len(accounts))]
+        if account["id"] in picked_ids:
+            continue
+        created = date.fromisoformat(account["created_at"])
+        floor = max(created + timedelta(days=RANDOM_ORGANIC_MIN_AGE_DAYS), earliest)
+        if floor > last_day:
+            continue
+        cancel_date = floor + timedelta(days=rng.randint(0, (last_day - floor).days))
+        picked_ids.add(account["id"])
+        subscription_events.append((
+            next_event_id, account["id"], cancel_date.isoformat(), "cancel", 0,
+        ))
+        next_event_id += 1
         churn_dates[account["id"]] = cancel_date
     return churn_dates
 
@@ -452,34 +576,37 @@ def iter_usage_events(rng, accounts, churn_dates):
             day += timedelta(days=1)
 
 
-def emit_usage_events(rng, accounts, churn_dates):
-    """Wrap `iter_usage_events` with the Sept-2026 ingest bug (issue #4).
+def emit_usage_events(rng, accounts, churn_dates, *, window=USAGE_BUG_WINDOW,
+                      segment=USAGE_BUG_SEGMENT,
+                      duplicate_share=USAGE_BUG_DUPLICATE_SHARE,
+                      null_share=USAGE_BUG_NULL_SHARE):
+    """Wrap `iter_usage_events` with an ingest bug (issue #4's seeded
+    shape; the keyword defaults reproduce it exactly, the random profile
+    overrides them).
 
     Streaming pass-through: memory stays O(1), ids stay insert-ordered and
     each baseline row flows through untouched except rows whose account is
-    Startup-segment and whose event_date is in USAGE_BUG_WINDOW — exactly
-    one rng.random() roll per such row decides: below
-    USAGE_BUG_DUPLICATE_SHARE the row is also emitted as an exact copy
-    (same account, ts, metric, amount — the duplicate group size is always
-    exactly 2, since the baseline emits at most one row per account-day);
-    below that plus USAGE_BUG_NULL_SHARE the row is emitted with
-    units = NULL. Other segments never see a roll, so their duplicate and
-    null rates are exactly 0. No collision with churn: churned accounts are
-    Growth-segment and the bug is Startup-only.
+    `segment`-segment and whose event_date is in `window` — exactly one
+    rng.random() roll per such row decides: below `duplicate_share` the row
+    is also emitted as an exact copy (same account, ts, metric, amount —
+    the duplicate group size is always exactly 2, since the baseline emits
+    at most one row per account-day); below that plus `null_share` the row
+    is emitted with units = NULL. Other segments never see a roll, so their
+    duplicate and null rates are exactly 0.
     """
     accounts_by_id = {account["id"]: account for account in accounts}
-    window_start, window_end = USAGE_BUG_WINDOW
+    window_start, window_end = window
     for row in iter_usage_events(rng, accounts, churn_dates):
         account_id, event_date, metric, units = row
         if (event_date < window_start or event_date > window_end
-                or accounts_by_id[account_id]["segment"] != USAGE_BUG_SEGMENT):
+                or accounts_by_id[account_id]["segment"] != segment):
             yield row
             continue
         roll = rng.random()
-        if roll < USAGE_BUG_DUPLICATE_SHARE:
+        if roll < duplicate_share:
             yield row
             yield row  # exact duplicate: same account, ts, metric, amount
-        elif roll < USAGE_BUG_DUPLICATE_SHARE + USAGE_BUG_NULL_SHARE:
+        elif roll < duplicate_share + null_share:
             yield (account_id, event_date, metric, None)
         else:
             yield row
@@ -497,11 +624,56 @@ def _insert_batched(conn, sql, rows, batch_size=INSERT_BATCH_ROWS):
         conn.executemany(sql, batch)
 
 
-def _print_summary(db_path):
-    """Print the facts the issue's acceptance checks eyeball without SQL."""
+def _draw_random_shapes(rng):
+    """Draw the random profile's shape parameters (one fixed draw order).
+
+    Returns a dict with every shape the random profile's builders override:
+    spike window (any day in the Jun 1–Sep 16 2026 start range), spike
+    segment and size (15–45), organic-cancel count (10–30), bug window
+    (14 days starting Jul 1 2026 or later, ending by data end) and the
+    bug's duplicate/null shares. Shapes are drawn BEFORE the builders so
+    the builder draw order stays the seeded profile's — the profile changes
+    the shape parameters, never the chain.
+    """
+    spike_days = (RANDOM_SPIKE_LATEST_START - RANDOM_SPIKE_EARLIEST).days
+    spike_start = RANDOM_SPIKE_EARLIEST + timedelta(days=rng.randint(0, spike_days))
+    spike_end = END_DATE
+    segment_names = tuple(name for name, _share in SEGMENT_MIX)
+    organic_total = rng.randint(*RANDOM_ORGANIC_CANCEL_COUNT)
+    bug_start = RANDOM_BUG_EARLIEST + timedelta(
+        days=rng.randint(0, (RANDOM_BUG_LATEST_START - RANDOM_BUG_EARLIEST).days)
+    )
+    bug_end = bug_start + timedelta(days=RANDOM_BUG_DAYS - 1)
+    return {
+        "spike": {
+            "start": spike_start,
+            "end": spike_end,
+            "segment": rng.choice(segment_names),
+            "count": rng.randint(*RANDOM_SPIKE_COUNT_RANGE),
+            "upgrade_back_days": RANDOM_UPGRADE_BACK_DAYS,
+        },
+        "organic_cancels": organic_total,
+        "bug": {
+            "start": bug_start,
+            "end": bug_end,
+            "segment": rng.choice(segment_names),
+            "duplicate_share": round(
+                rng.uniform(*RANDOM_DUP_SHARE_RANGE), 4
+            ),
+            "null_share": round(rng.uniform(*RANDOM_NULL_SHARE_RANGE), 4),
+        },
+    }
+
+
+def _print_summary(db_path, *, profile="seeded", seed=SEED, shapes=None):
+    """Print the facts the issue's acceptance checks eyeball without SQL.
+
+    The trailing churn/ingest-bug block prints the given shapes' windows —
+    the seeded profile's pinned windows when shapes is None (backward-
+    compatible output), the drawn random-profile shapes otherwise."""
     conn = db.connect(db_path, readonly=True)
     try:
-        print(f"Generated {db_path} (seed {SEED})")
+        print(f"Generated {db_path} (seed {seed}, profile {profile})")
         for table in TABLE_NAMES:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count:,} rows")
@@ -522,7 +694,13 @@ def _print_summary(db_path):
                 f"SELECT MIN(event_date), MAX(event_date) FROM {table}"
             ).fetchone()
             print(f"  {table} dates: {min_date} .. {max_date}")
-        window = (CHURN_WINDOW_START.isoformat(), CHURN_WINDOW_END.isoformat())
+        shapes = shapes or {}
+        spike = shapes.get("spike") or {}
+        bug = shapes.get("bug") or {}
+        window = (
+            (spike.get("start") or CHURN_WINDOW_START).isoformat(),
+            (spike.get("end") or CHURN_WINDOW_END).isoformat(),
+        )
         churned = conn.execute(
             "SELECT COUNT(*) FROM subscription_events "
             "WHERE event_type = 'cancel' AND event_date BETWEEN ? AND ?",
@@ -540,6 +718,11 @@ def _print_summary(db_path):
             f"{churned:,} — "
             + ", ".join(f"{segment}={count:,}" for segment, count in by_segment)
         )
+        bug_window = (
+            (bug.get("start") or date.fromisoformat(USAGE_BUG_WINDOW[0])).isoformat(),
+            (bug.get("end") or date.fromisoformat(USAGE_BUG_WINDOW[1])).isoformat(),
+        )
+        bug_segment = bug.get("segment") or USAGE_BUG_SEGMENT
         dup_rows = conn.execute(
             "SELECT COALESCE(SUM(n - 1), 0) FROM ("
             "  SELECT COUNT(*) AS n FROM usage_events u "
@@ -547,18 +730,18 @@ def _print_summary(db_path):
             "  WHERE u.event_date BETWEEN ? AND ? AND a.segment = ? "
             "  GROUP BY u.account_id, u.event_date, u.units HAVING n > 1"
             ")",
-            (USAGE_BUG_WINDOW[0], USAGE_BUG_WINDOW[1], USAGE_BUG_SEGMENT),
+            (bug_window[0], bug_window[1], bug_segment),
         ).fetchone()[0]
         null_rows = conn.execute(
             "SELECT COUNT(*) FROM usage_events u "
             "JOIN accounts a ON a.id = u.account_id "
             "WHERE u.event_date BETWEEN ? AND ? AND a.segment = ? "
             "AND u.units IS NULL",
-            (USAGE_BUG_WINDOW[0], USAGE_BUG_WINDOW[1], USAGE_BUG_SEGMENT),
+            (bug_window[0], bug_window[1], bug_segment),
         ).fetchone()[0]
         print(
-            f"  ingest bug {USAGE_BUG_WINDOW[0]}..{USAGE_BUG_WINDOW[1]} "
-            f"({USAGE_BUG_SEGMENT} only): duplicate rows {dup_rows:,}, "
+            f"  ingest bug {bug_window[0]}..{bug_window[1]} "
+            f"({bug_segment} only): duplicate rows {dup_rows:,}, "
             f"null-amount rows {null_rows:,}"
         )
     finally:
@@ -570,7 +753,9 @@ def main(argv=None):
         description=(
             "Generate the deterministic seeded mock SQLite database "
             "(data/app.db by default) with the Q3-2026 growth ramp, the "
-            "Aug-2026 churn spike and the Sept-2026 ingest-bug shapes."
+            "Aug-2026 churn spike and the Sept-2026 ingest-bug shapes — "
+            "or, with --profile random, a same-period dataset with organic "
+            "growth and randomly placed, seed-picked shapes."
         )
     )
     parser.add_argument(
@@ -578,15 +763,74 @@ def main(argv=None):
         default=str(db.DEFAULT_DB_PATH),
         help="target SQLite file, created fresh (default: repo-root data/app.db)",
     )
+    parser.add_argument(
+        "--profile",
+        choices=PROFILES,
+        default="seeded",
+        help=(
+            "seeded (default): the PRD's three choreographed demo shapes; "
+            "random: organic growth + randomly placed churn spike and "
+            "ingest bug (shapes picked by --seed)"
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=SEED,
+        help="RNG seed for the random profile's drawn shapes (default: the "
+        "fixed demo seed); any value yields a reproducible dataset. The "
+        "seeded profile ignores --seed — its output is pinned to the fixed "
+        "demo seed.",
+    )
     args = parser.parse_args(argv)
     db_path = Path(args.db_path)
-    rng = random.Random(SEED)
-    plan = plan_months(rng)
-    accounts, subscription_events = build_accounts(rng, plan)
-    churn_dates = apply_churn(rng, accounts, subscription_events)
-    _sort_and_renumber_events(subscription_events)
-    timelines = _account_timelines(accounts, subscription_events)
-
+    # The seeded profile is the PRD's demo contract: its output is pinned to
+    # the fixed module SEED regardless of --seed (the golden tests and
+    # verify_demo.py pin it verbatim), so a --seed value only shapes the
+    # random profile's drawn dataset.
+    rng = random.Random(args.seed if args.profile == "random" else SEED)
+    if args.profile == "random":
+        shapes = _draw_random_shapes(rng)
+        spike = shapes["spike"]
+        bug = shapes["bug"]
+        plan = plan_months(rng, campaign_counts=None, baseline_range=RANDOM_NEW_COUNT_RANGE)
+        accounts, subscription_events = build_accounts(rng, plan)
+        churn_dates = apply_churn(
+            rng,
+            accounts,
+            subscription_events,
+            segment=spike["segment"],
+            window_start=spike["start"],
+            window_end=spike["end"],
+            count=spike["count"],
+            candidate_cutoff=spike["start"].isoformat(),
+            upgrade_back_days=spike["upgrade_back_days"],
+        )
+        churn_dates.update(apply_organic_churn(
+            rng, accounts, subscription_events, churn_dates,
+            shapes["organic_cancels"],
+        ))
+        _sort_and_renumber_events(subscription_events)
+        timelines = _account_timelines(accounts, subscription_events)
+        bug_window = (bug["start"].isoformat(), bug["end"].isoformat())
+        usage_events = emit_usage_events(
+            rng,
+            accounts,
+            churn_dates,
+            window=bug_window,
+            segment=bug["segment"],
+            duplicate_share=bug["duplicate_share"],
+            null_share=bug["null_share"],
+        )
+        summary_shapes = shapes
+    else:
+        plan = plan_months(rng)
+        accounts, subscription_events = build_accounts(rng, plan)
+        churn_dates = apply_churn(rng, accounts, subscription_events)
+        _sort_and_renumber_events(subscription_events)
+        timelines = _account_timelines(accounts, subscription_events)
+        usage_events = emit_usage_events(rng, accounts, churn_dates)
+        summary_shapes = None
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # Unlink first so reruns over an existing path are idempotent instead of
     # appending duplicate rows onto the old schema.
@@ -619,12 +863,17 @@ def main(argv=None):
             conn,
             "INSERT INTO usage_events (account_id, event_date, metric, units) "
             "VALUES (?, ?, ?, ?)",
-            emit_usage_events(rng, accounts, churn_dates),
+            usage_events,
         )
         conn.commit()
     finally:
         conn.close()
-    _print_summary(db_path)
+    _print_summary(
+        db_path,
+        profile=args.profile,
+        seed=args.seed if args.profile == "random" else SEED,
+        shapes=summary_shapes,
+    )
     return db_path
 
 

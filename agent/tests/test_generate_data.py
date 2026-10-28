@@ -337,3 +337,320 @@ def test_db_helper_contract(tmp_path):
     # Readonly mode must fail on a missing file instead of creating one.
     with pytest.raises(sqlite3.OperationalError):
         db.connect(tmp_path / "missing.db", readonly=True)
+
+
+class TestRandomProfile:
+    """--profile random: the sample-dataset harness (data the agent was
+    never staged for). Same period and schema, organic growth, and a churn
+    spike + ingest bug drawn by --seed instead of pinned. Every assertion
+    derives from the calendar structure, not the seeded shapes: organic
+    cancels land strictly before June 2026 (RANDOM_ORGANIC_LAST_DAY) and
+    spike cancels on/after the drawn June-or-later start, so the two cohorts
+    split cleanly on the calendar; NULL-units rows exist ONLY inside the
+    drawn bug window and ONLY in the drawn bug segment (the corruption roll
+    never fires elsewhere), which pins the bug window from the DB."""
+
+    @staticmethod
+    def _run(db_path, seed, profile="random"):
+        """Run the generator like the runtime gate does, failing on a
+        nonzero exit. profile defaults to the random profile this class
+        exercises; the seeded-profile test passes profile="seeded"."""
+        result = subprocess.run(
+            [
+                sys.executable, str(GENERATOR),
+                "--db-path", str(db_path),
+                "--profile", profile, "--seed", str(seed),
+            ],
+            cwd=AGENT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        return result.stdout
+
+    @staticmethod
+    def _shapes(db_path):
+        """The drawn shapes derived from the DB alone: spike cohort (cancels
+        on/after 2026-06-01), organic tail (cancels before June), bug window
+        and segment (the NULL-units rows' own span and segments), in-window
+        corruption counts, and the ARR bookkeeping invariant's mismatch
+        count."""
+        conn = db.connect(db_path, readonly=True)
+        try:
+            cancels = conn.execute(
+                "SELECT MIN(event_date) AS first, MAX(event_date) AS last, "
+                "       COUNT(*) AS total FROM subscription_events "
+                "WHERE event_type = 'cancel' AND event_date >= '2026-06-01'"
+            ).fetchone()
+            organic = conn.execute(
+                "SELECT COUNT(*) FROM subscription_events "
+                "WHERE event_type = 'cancel' AND event_date < '2026-06-01'"
+            ).fetchone()[0]
+            bug = conn.execute(
+                "SELECT MIN(event_date) AS bug_start, MAX(event_date) AS bug_end "
+                "FROM usage_events WHERE units IS NULL"
+            ).fetchone()
+            segments = conn.execute(
+                "SELECT DISTINCT a.segment FROM usage_events u "
+                "JOIN accounts a ON a.id = u.account_id WHERE u.units IS NULL"
+            ).fetchall()
+            window_rows = dup_extras = null_rows = 0
+            if bug["bug_start"] is not None:
+                bug_segment = segments[0]["segment"]
+                window_rows = conn.execute(
+                    "SELECT COUNT(*) FROM usage_events u "
+                    "JOIN accounts a ON a.id = u.account_id "
+                    "WHERE u.event_date BETWEEN ? AND ? AND a.segment = ?",
+                    (bug["bug_start"], bug["bug_end"], bug_segment),
+                ).fetchone()[0]
+                dup_extras = conn.execute(
+                    "SELECT COALESCE(SUM(n - 1), 0) FROM ("
+                    "  SELECT COUNT(*) AS n FROM usage_events u "
+                    "  JOIN accounts a ON a.id = u.account_id "
+                    "  WHERE u.event_date BETWEEN ? AND ? AND a.segment = ? "
+                    "  GROUP BY u.account_id, u.event_date, u.units HAVING n > 1"
+                    ")",
+                    (bug["bug_start"], bug["bug_end"], bug_segment),
+                ).fetchone()[0]
+                null_rows = conn.execute(
+                    "SELECT COUNT(*) FROM usage_events u "
+                    "JOIN accounts a ON a.id = u.account_id "
+                    "WHERE u.event_date BETWEEN ? AND ? AND a.segment = ? "
+                    "AND u.units IS NULL",
+                    (bug["bug_start"], bug["bug_end"], bug_segment),
+                ).fetchone()[0]
+            mismatch = conn.execute(
+                "SELECT COUNT(*) FROM accounts a LEFT JOIN ("
+                "  SELECT account_id, SUM(arr_delta_cents) AS total "
+                "  FROM subscription_events GROUP BY account_id) s "
+                "ON s.account_id = a.id WHERE COALESCE(s.total, 0) <> a.arr_cents"
+            ).fetchone()[0]
+            return {
+                "spike_start": cancels["first"],
+                "spike_end": cancels["last"],
+                "spike_count": cancels["total"],
+                "organic_count": organic,
+                "bug_start": bug["bug_start"],
+                "bug_end": bug["bug_end"],
+                "bug_segments": sorted(row["segment"] for row in segments),
+                "bug_window_rows": window_rows,
+                "bug_dup_extras": dup_extras,
+                "bug_null_rows": null_rows,
+                "arr_mismatches": mismatch,
+            }
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _counts(db_path):
+        conn = db.connect(db_path, readonly=True)
+        try:
+            return {
+                table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in TABLES
+            }
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _billing_stops_at_cancel(db_path):
+        """No account is billed or emits usage past its first cancel day —
+        the merged spike+organic churn_dates govern both emissions."""
+        conn = db.connect(db_path, readonly=True)
+        try:
+            overrevenue = conn.execute(
+                "SELECT COUNT(*) FROM ("
+                "  SELECT s.account_id, MIN(s.event_date) AS cancel_date, "
+                "         MAX(r.event_date) AS last_revenue "
+                "  FROM subscription_events s "
+                "  LEFT JOIN revenue_events r ON r.account_id = s.account_id "
+                "  WHERE s.event_type = 'cancel' GROUP BY s.account_id"
+                ") WHERE last_revenue > cancel_date"
+            ).fetchone()[0]
+            overusage = conn.execute(
+                "SELECT COUNT(*) FROM ("
+                "  SELECT s.account_id, MIN(s.event_date) AS cancel_date, "
+                "         MAX(u.event_date) AS last_usage "
+                "  FROM subscription_events s "
+                "  LEFT JOIN usage_events u ON u.account_id = s.account_id "
+                "  WHERE s.event_type = 'cancel' GROUP BY s.account_id"
+                ") WHERE last_usage > cancel_date"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        return overrevenue, overusage
+
+    @pytest.fixture(scope="class")
+    def random_generated(self, tmp_path_factory):
+        """DB A and DB B from one seed, DB A regenerated in place, DB C from
+        a different seed — snapshots for the identity and variation tests."""
+        tmp = tmp_path_factory.mktemp("random_profile")
+        db_a, db_b, db_c = tmp / "a.db", tmp / "b.db", tmp / "c.db"
+        self._run(db_a, 7)
+        first = (self._counts(db_a), self._shapes(db_a))
+        self._run(db_b, 7)
+        second = (self._counts(db_b), self._shapes(db_b))
+        self._run(db_a, 7)
+        rerun = (self._counts(db_a), self._shapes(db_a))
+        self._run(db_c, 99)
+        other = (self._counts(db_c), self._shapes(db_c))
+        return {"db_a": db_a, "first": first, "second": second,
+                "rerun": rerun, "db_c": db_c, "other": other}
+
+    def test_random_reruns_identical(self, random_generated):
+        """The same --seed twice yields identical per-table row counts AND
+        identical drawn shapes; a rerun over the same path too."""
+        assert (random_generated["first"]
+                == random_generated["second"]
+                == random_generated["rerun"])
+
+    def test_random_tables_are_populated(self, random_generated):
+        """All four tables hold rows on the random profile (a vacuous empty
+        DB would make every shape assertion vacuous too)."""
+        counts = random_generated["first"][0]
+        for table, count in counts.items():
+            assert count > 0, table
+
+    def test_random_invariants_hold(self, random_generated):
+        """Structural invariants regardless of the drawn shapes: the spike
+        cohort is 15–45 cancels inside Jun 1 2026..data end, the organic
+        tail is 10–30 cancels strictly before June, the bug window is 14
+        days inside Jul 1..data end in ONE segment with corruption shares
+        inside the drawn bands, ARR bookkeeping is intact, and billing stops
+        at the cancel day."""
+        _counts, shapes = random_generated["first"]
+        assert 15 <= shapes["spike_count"] <= 45
+        assert "2026-06-01" <= shapes["spike_start"] <= "2026-09-30"
+        assert shapes["spike_end"] <= "2026-09-30"
+        assert 10 <= shapes["organic_count"] <= 30
+        assert shapes["bug_start"] is not None
+        assert "2026-07-01" <= shapes["bug_start"] <= "2026-09-17"
+        assert shapes["bug_end"] <= "2026-09-30"
+        # The bug window spans exactly RANDOM_BUG_DAYS (14) calendar days.
+        assert (
+            date.fromisoformat(shapes["bug_end"])
+            - date.fromisoformat(shapes["bug_start"])
+        ).days == 13
+        assert len(shapes["bug_segments"]) == 1
+        # The corruption shares (against the segment's own baseline rows —
+        # the generator's denominators) sit inside the drawn bands.
+        baseline_rows = shapes["bug_window_rows"] - shapes["bug_dup_extras"]
+        assert baseline_rows > 0
+        assert 0.12 <= shapes["bug_dup_extras"] / baseline_rows <= 0.20
+        assert 0.05 <= shapes["bug_null_rows"] / baseline_rows <= 0.08
+        # Duplicate extras and NULL rows exist ONLY in the drawn segment —
+        # every other segment's whole history is corruption-free.
+        conn = db.connect(random_generated["db_a"], readonly=True)
+        try:
+            clean = conn.execute(
+                "SELECT COUNT(*) FROM usage_events u "
+                "JOIN accounts a ON a.id = u.account_id "
+                "WHERE a.segment <> ? AND (u.units IS NULL)",
+                (shapes["bug_segments"][0],),
+            ).fetchone()[0]
+            clean_dups = conn.execute(
+                "SELECT COALESCE(SUM(n - 1), 0) FROM ("
+                "  SELECT COUNT(*) AS n FROM usage_events u "
+                "  JOIN accounts a ON a.id = u.account_id "
+                "  WHERE a.segment <> ? "
+                "  GROUP BY u.account_id, u.event_date, u.units HAVING n > 1"
+                ")",
+                (shapes["bug_segments"][0],),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert clean == 0 and clean_dups == 0
+        # The spike cohort's cancels all carry the repricing signature the
+        # agent's cause narrative reads: an in-window upgrade within 14 days
+        # before the cancel.
+        conn = db.connect(random_generated["db_a"], readonly=True)
+        try:
+            repriced = conn.execute(
+                "SELECT COUNT(*) FROM subscription_events s "
+                "WHERE s.event_type = 'cancel' AND s.event_date >= '2026-06-01' "
+                "  AND EXISTS (SELECT 1 FROM subscription_events u "
+                "              WHERE u.account_id = s.account_id "
+                "                AND u.event_type = 'upgrade' "
+                "                AND u.event_date BETWEEN "
+                "                    date(s.event_date, '-14 days') "
+                "                    AND s.event_date)"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert repriced == shapes["spike_count"]
+        assert shapes["arr_mismatches"] == 0
+        overrevenue, overusage = self._billing_stops_at_cancel(
+            random_generated["db_a"]
+        )
+        assert overrevenue == 0 and overusage == 0
+
+    def test_random_different_seed_varies(self, random_generated):
+        """A different seed draws a different dataset — the harness really
+        varies (at least one of the drawn shapes differs), while every
+        drawn dataset still passes the structural invariants."""
+        first, other = random_generated["first"], random_generated["other"]
+        counts_a, shapes_a = first
+        counts_c, shapes_c = other
+        assert shapes_a != shapes_c or counts_a != counts_c
+
+    def test_random_summary_shapes_match_the_database(self, tmp_path):
+        """The summary's trailing churn/bug block prints the DRAWN shapes:
+        the spike window spans the drawn range (its start can precede the
+        first actual cancel day), the bug window's end always lands on data
+        end, and the printed counts/segment equal the DB's derived values —
+        no invented or stale numbers."""
+        db_a = tmp_path / "sum.db"
+        stdout = self._run(db_a, 13)
+        shapes = self._shapes(db_a)
+        churn_line = next(
+            line for line in stdout.splitlines()
+            if line.strip().startswith("churned accounts")
+        )
+        # "churned accounts (cancels) START..END: N — Segment=M, ..."
+        printed_window = churn_line.split("cancels) ")[1].split(":")[0]
+        printed_start, printed_end = printed_window.split("..")
+        printed_count = int(churn_line.rsplit(": ", 1)[1].split(" ")[0])
+        # The drawn window starts June-or-later and can precede the first
+        # cancel; its end is always the data horizon. Every spike cancel is
+        # inside it and no organic cancel is (< June), so the count matches.
+        assert "2026-06-01" <= printed_start <= shapes["spike_start"]
+        assert printed_end == "2026-09-30"
+        assert printed_count == shapes["spike_count"]
+        bug_line = next(
+            line for line in stdout.splitlines()
+            if line.strip().startswith("ingest bug")
+        )
+        # "ingest bug START..END (SEG only): duplicate rows X, null-amount rows Y"
+        printed_bug_window = bug_line.split("bug ")[1].split(" (")[0]
+        printed_bug_start, printed_bug_end = printed_bug_window.split("..")
+        printed_segment = bug_line.split("(")[1].split(" only")[0]
+        printed_dups = int(bug_line.split("duplicate rows ")[1].split(",")[0])
+        printed_nulls = int(bug_line.split("null-amount rows ")[1])
+        # The drawn 14-day window contains every NULL row and every dup
+        # extra; all corruption lives in the printed segment.
+        assert (
+            date.fromisoformat(printed_bug_end)
+            - date.fromisoformat(printed_bug_start)
+        ).days == 13
+        assert printed_bug_start <= shapes["bug_start"]
+        assert printed_bug_end >= shapes["bug_end"]
+        assert printed_segment == shapes["bug_segments"][0]
+        assert printed_dups == shapes["bug_dup_extras"]
+        assert printed_nulls == shapes["bug_null_rows"]
+
+    def test_seeded_profile_ignores_seed(self, tmp_path):
+        """The default (seeded) profile is the PRD's demo contract: any
+        --seed value still produces the pinned shapes — two different seeds
+        yield identical counts and identical planted-shape metrics, and the
+        shape derivation reads the seeded cohort as the spike (40 cancels
+        inside the pinned window, zero organic tail)."""
+        db_a, db_b = tmp_path / "s1.db", tmp_path / "s2.db"
+        self._run(db_a, 1, profile="seeded")
+        self._run(db_b, 999999, profile="seeded")
+        assert self._counts(db_a) == self._counts(db_b)
+        assert self._shapes(db_a) == self._shapes(db_b)
+        shapes = self._shapes(db_a)
+        assert shapes["spike_count"] == 40
+        assert shapes["organic_count"] == 0
+        assert shapes["spike_start"] == "2026-08-10"

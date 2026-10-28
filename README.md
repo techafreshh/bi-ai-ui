@@ -99,6 +99,32 @@ docker compose up -d
   writes KPI-grounded copy instead of model text (boot also self-seeds
   `data/app.db` in the background when it is missing).
 
+### Sample datasets: unplanted random data
+
+The seeded profile's three shapes are choreographed for the demo (PRD
+§7). To test the agent against data it was **never staged for** — organic
+growth, a churn spike in an unpredictable month/segment, an ingest bug in
+an unpredictable window — generate the random profile:
+
+```bash
+./scripts/reset_data.sh --restart --profile random --seed 7
+```
+
+`--seed` picks the shapes (the same seed always rebuilds the identical
+dataset; different seeds draw different ones) and `--restart` stops and
+restarts the agent around the regeneration. On host Python instead:
+`python agent/scripts/generate_data.py --profile random --seed 7`.
+The summary the generator prints names the drawn spike/bug windows so you
+know what to ask — e.g. ask "Why did churn spike in {the drawn month}?"
+instead of the demo script's "August". Two things differ on this profile:
+
+- The demo script's exact numbers (Q3 ramp, 40-row cohort, Sept bug) are
+  the *seeded* profile's; on random data the same queries still stream the
+  same component pairs, composed from whatever the data holds.
+- `scripts/verify_demo.py` pins the seeded shapes (38–50 cohort rows,
+  duplicates:fail …) — its planted-shape probes are expected to MISS on a
+  random-profile DB; switch back with a bare `./scripts/reset_data.sh`.
+
 ## Environment
 
 ```bash
