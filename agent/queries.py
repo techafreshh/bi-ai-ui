@@ -80,6 +80,16 @@ try:  # package-style entry (import agent.queries from the repo root)
 except ModuleNotFoundError:  # script-style entry (import queries from agent/)
     import db
 
+try:  # package-style entry (import agent.queries from the repo root)
+    from agent.semantics import load_metrics
+except ModuleNotFoundError:  # script-style entry (import queries from agent/)
+    from semantics import load_metrics
+
+# Metric registry compiled at import (issue #77): the YAML file's typos
+# raise here — at startup, before any query runs — so the server refuses
+# to boot on a bad file instead of serving queries against it.
+METRICS = load_metrics()
+
 # The only metric churn_delta accepts; anything else is ValueError.
 _CHURN_METRICS = ("churn_rate",)
 
@@ -371,6 +381,35 @@ def kpis(start, end):
     }
 
 
+def gross_churned_arr(start, end):
+    """Gross churned ARR in dollars over the inclusive window: the
+    churn-time ARR of every cancelling account summed via _SQL_CHURNED_ARR
+    (issue #77's file-only metric — no new SQL, the same template the
+    churn rate's numerator uses, without the active-base division)."""
+    start, end = _require_window(start, end)
+    conn = db.connect(readonly=True)
+    try:
+        churned_cents = conn.execute(
+            _SQL_CHURNED_ARR, (start, end)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return round(churned_cents / 100, 2)
+
+
+def active_accounts_eom(end):
+    """Active-account count at the window end day via _SQL_ACTIVE_DAY
+    (issue #77's file-only metric — no new SQL, the same point-in-time
+    template mrr/accounts read, count half only)."""
+    day = _require_date(end, "end")
+    conn = db.connect(readonly=True)
+    try:
+        row = conn.execute(_SQL_ACTIVE_DAY, (day,)).fetchone()
+    finally:
+        conn.close()
+    return row[1]
+
+
 def arr_series(start, end):
     """One {"date", "arr"} row per calendar day from `start` to `end`
     inclusive, `arr` = total active ARR that day in dollars (0.0 on uncovered
@@ -581,3 +620,44 @@ def churn_delta(end, metric="churn_rate", baseline_months=6):
     else:
         delta = 1.0 if current > 0.0 else 0.0
     return {"delta": delta, "baseline": baseline, "current": current}
+
+
+def _metric_data_quality(start, end):
+    """data_quality dispatch helper: the lazy in-function import keeps
+    queries import-cycle-free (quality only ever imports db)."""
+    try:  # package-style entry (import agent.queries from the repo root)
+        from agent import quality as _quality
+    except ModuleNotFoundError:  # script-style (import queries from agent/)
+        import quality as _quality
+    return _quality.run_checks(start, end)
+
+
+# Compiler dispatch (issue #77): every registry name maps onto an EXISTING
+# implementation — kpis key lookups, churn_delta's current rate, the lazy
+# quality statuses, and the two file-only metrics above that reuse the
+# existing static templates. No new _SQL_* strings live behind this map.
+_METRIC_FUNCS = {
+    "net_new_arr": lambda s, e: kpis(s, e)["net_new_arr"],
+    "mrr": lambda s, e: kpis(s, e)["mrr"],
+    "nrr": lambda s, e: kpis(s, e)["nrr"],
+    "active_accounts": lambda s, e: kpis(s, e)["accounts"],
+    "churn_rate": lambda s, e: churn_delta(end=e)["current"],
+    "data_quality": _metric_data_quality,
+    "gross_churned_arr": lambda s, e: gross_churned_arr(s, e),
+    "active_accounts_eom": lambda s, e: active_accounts_eom(e),
+}
+
+
+def metric_value(name, start, end=None):
+    """Compiled registry value for metric `name` over [start, end or
+    start]: the queries.py half of the issue #77 contract. Unknown names
+    raise ValueError (quoted, like the _CHURN_METRICS whitelist) before
+    any SQL runs."""
+    if name not in _METRIC_FUNCS:
+        raise ValueError(
+            f"metric {name!r} is not whitelisted; "
+            f"must be one of {tuple(_METRIC_FUNCS)}"
+        )
+    if end is None:
+        end = start
+    return _METRIC_FUNCS[name](start, end)
