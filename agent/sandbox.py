@@ -252,6 +252,53 @@ def load_bytes(table, raw, dataset_id, sandbox_dir=None):
     return dest, len(rows), data_end
 
 
+def load_tables(rows_by_table, dataset_id, sandbox_dir=None):
+    """Write already-coerced multi-table rows into one fresh sandbox DB.
+
+    `rows_by_table` maps each table name to its list of row tuples (in the
+    table's column order). Every id, table and arity is validated BEFORE
+    any I/O, then the destination is unlinked once, the full schema plus
+    the three `event_date` indexes is created, and one `executemany` per
+    table inserts the rows. Returns the sandbox path. Stdlib only, same
+    rerun-idempotence idiom as `load_table`.
+    """
+    _require_dataset_id(dataset_id)
+    coerced = {}
+    for table, rows in rows_by_table.items():
+        _require_table(table)
+        columns = _TABLE_COLUMNS[table]
+        materialized = list(rows)
+        for row in materialized:
+            if len(row) != len(columns):
+                raise ValueError(
+                    f"table {table!r} expects {len(columns)} values, "
+                    f"got {len(row)}"
+                )
+        coerced[table] = (columns, materialized)
+    directory = Path(sandbox_dir) if sandbox_dir is not None else db.SANDBOX_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    dest = directory / f"{dataset_id}.db"
+    # Unlink once so reruns over an existing id are idempotent instead of
+    # failing on the precreated schema or appending duplicate rows; a
+    # per-table unlink (see `load_table`'s old shape) would wipe siblings.
+    if dest.exists():
+        dest.unlink()
+    conn = sqlite3.connect(str(dest), timeout=10.0)
+    try:
+        conn.executescript(SANDBOX_SCHEMA_SQL)
+        for table, (columns, rows) in coerced.items():
+            placeholders = ", ".join(["?"] * len(columns))
+            conn.executemany(
+                f"INSERT INTO {table} ({', '.join(columns)}) "
+                f"VALUES ({placeholders})",
+                rows,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return dest
+
+
 def load_table(table, rows, dataset_id, sandbox_dir=None):
     """Write already-coerced `rows` (a list of tuples in the table's column
     order) into a fresh `data/sandboxes/<dataset_id>.db` carrying the full
@@ -259,37 +306,10 @@ def load_table(table, rows, dataset_id, sandbox_dir=None):
 
     An existing same-id file is unlinked first (rerun idempotence); the
     parent directory is created. `table` must be a known schema table and
-    every row must match its arity, or ValueError.
+    every row must match its arity, or ValueError. Single-entry delegation
+    to `load_tables` so the unlink/parse behavior stays identical.
     """
-    _require_dataset_id(dataset_id)
-    _require_table(table)
-    columns = _TABLE_COLUMNS[table]
-    for row in rows:
-        if len(row) != len(columns):
-            raise ValueError(
-                f"table {table!r} expects {len(columns)} values, "
-                f"got {len(row)}"
-            )
-    directory = Path(sandbox_dir) if sandbox_dir is not None else db.SANDBOX_DIR
-    directory.mkdir(parents=True, exist_ok=True)
-    dest = directory / f"{dataset_id}.db"
-    # Unlink first so reruns over an existing id are idempotent instead of
-    # failing on the precreated schema or appending duplicate rows.
-    if dest.exists():
-        dest.unlink()
-    placeholders = ", ".join(["?"] * len(columns))
-    conn = sqlite3.connect(str(dest), timeout=10.0)
-    try:
-        conn.executescript(SANDBOX_SCHEMA_SQL)
-        conn.executemany(
-            f"INSERT INTO {table} ({', '.join(columns)}) "
-            f"VALUES ({placeholders})",
-            rows,
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return dest
+    return load_tables({table: rows}, dataset_id, sandbox_dir)
 
 
 def load_csv(csv_path, dataset_id, table=None, sandbox_dir=None):

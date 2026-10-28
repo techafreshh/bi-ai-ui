@@ -44,9 +44,9 @@ except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/
     from graph import graph
 
 try:  # package-style entry (uvicorn agent.server:app from the repo root)
-    from agent.sandbox import ALLOWED_TABLES, load_bytes
+    from agent.sandbox import ALLOWED_TABLES, _parse_text, load_bytes, load_tables
 except ModuleNotFoundError:  # script-style entry (python3 server.py from agent/)
-    from sandbox import ALLOWED_TABLES, load_bytes
+    from sandbox import ALLOWED_TABLES, _parse_text, load_bytes, load_tables
 
 try:  # package-style entry (uvicorn agent.server:app from the repo root)
     from agent import datasets
@@ -164,6 +164,59 @@ def create_app() -> FastAPI:
     @app.get("/data/datasets")
     async def list_datasets():
         return datasets.list_datasets()
+
+    # Server-side sample miniature (issue #76): assembles ONE sandbox DB
+    # from all four SAMPLES_DIR/*.csv files, registers it with source
+    # "sample" and activates it in one call. Each CSV is fully validated
+    # through sandbox._parse_text BEFORE any file is created, so every 400
+    # leaves no `.db` behind; a missing samples dir (or a missing stem
+    # file) is 404 {"error"}. The samples dir resolves from SAMPLES_DIR
+    # (the docker-compose agent mount) defaulting to the repo-root
+    # samples/ dir anchored from this file, mirroring db.py/datasets.py.
+    @app.post("/data/sample")
+    async def load_sample():
+        raw_samples = os.getenv("SAMPLES_DIR", "")
+        samples_dir = (
+            Path(raw_samples.strip())
+            if raw_samples and raw_samples.strip()
+            else Path(__file__).resolve().parents[1] / "samples"
+        )
+        if not samples_dir.is_dir():
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"samples directory not found: {samples_dir}"},
+            )
+        rows_by_table = {}
+        for table in ALLOWED_TABLES:
+            csv_path = samples_dir / f"{table}.csv"
+            if not csv_path.is_file():
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"sample file not found: {csv_path.name}"},
+                )
+            try:
+                text = csv_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"{csv_path.name} is not valid UTF-8"},
+                )
+            try:
+                rows, _ = _parse_text(table, text, str(csv_path))
+            except ValueError as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
+            rows_by_table[table] = rows
+        dataset_id = uuid.uuid4().hex
+        dest = load_tables(rows_by_table, dataset_id)
+        datasets.register(dataset_id, dest, "sample")
+        datasets.set_active(dataset_id)
+        profile = datasets.profile_db(dest)
+        return {
+            "active_id": dataset_id,
+            "tables": profile["tables"],
+            "rows": profile["rows"],
+            "data_end": profile["data_end"],
+        }
 
     # Explicit activation (issue #75): a known id moves the process-wide
     # active path every later db.connect() resolves, so all subsequent
