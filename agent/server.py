@@ -640,10 +640,15 @@ def create_app() -> FastAPI:
     # Guarded SQL escape hatch (issue #83): exactly one leading SELECT,
     # capped rows, read-only connection. Sequential validation mirrors the
     # /data/run style — body shape, single-statement (`;`), leading
-    # SELECT, blocked keywords — each a 400 {"error"} before any I/O.
-    # Success runs wrapped as SELECT * FROM (<sql>) LIMIT <cap> over
-    # db.connect_ro() (mode=ro URI + SQL_TIMEOUT_S) and returns 200
-    # {"columns", "rows"}; every sqlite failure maps to 400 {"error"}.
+    # SELECT, blocked keywords, then the active-dataset probe — each a 400
+    # {"error"} before any I/O. The probe (issue #91, same
+    # queries.latest_event_date() try/except idiom as the /data/run
+    # handler) turns every unreadable dataset — missing file, missing
+    # tables, empty event history — into 400 "no active dataset" instead
+    # of leaking the raw sqlite error. Success runs wrapped as
+    # SELECT * FROM (<sql>) LIMIT <cap> over db.connect_ro() (mode=ro URI
+    # + SQL_TIMEOUT_S) and returns 200 {"columns", "rows"}; every sqlite
+    # failure maps to 400 {"error"}.
     @app.post("/data/query")
     async def run_query(request: Request):
         try:
@@ -671,6 +676,12 @@ def create_app() -> FastAPI:
                 content={"error": "blocked: statement contains a blocked keyword"},
             )
         cap = _query_limit()
+        try:
+            queries.latest_event_date()
+        except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+            return JSONResponse(
+                status_code=400, content={"error": "no active dataset"}
+            )
         try:
             conn = db.connect_ro()
         except Exception:  # noqa: BLE001 - unreadable DB reads as empty
