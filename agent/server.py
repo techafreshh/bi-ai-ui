@@ -14,6 +14,7 @@ import argparse
 import logging
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import sys
@@ -21,7 +22,63 @@ import uuid
 from datetime import date
 from pathlib import Path
 
-from dotenv import load_dotenv
+
+def _bootstrap_via_uv_if_needed() -> None:
+    """Re-exec through `uv run` when the FastAPI stack is missing.
+
+    Factory harnesses launch the agent with the bare system python
+    (`/usr/bin/python3 server.py --port ...`), which has no third-party
+    packages. The repo's canonical env is the agent venv (`uv sync`);
+    when FastAPI is unimportable and `uv` exists, re-exec the same argv
+    under `uv run --project <agent_dir>` so the launch self-heals instead
+    of dying with `No module named uvicorn`. Only acts when this file is
+    the entry point (`python server.py ...`): plain imports (`import
+    server`, `uvicorn agent.server:app`) never re-exec, so test harnesses
+    keep the normal ImportError. Guarded by `_BI_AI_UI_BOOTSTRAPPED`
+    against re-exec loops; when `uv` is absent (or this is not the agent
+    project) fall through to the normal ImportError so the missing
+    dependency stays visible."""
+    if __name__ != "__main__":
+        return
+    if os.getenv("_BI_AI_UI_BOOTSTRAPPED"):
+        return
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+        return
+    except ImportError:
+        pass
+    uv = shutil.which("uv")
+    if uv is None:
+        for candidate in ("/usr/local/bin/uv", "/root/.local/bin/uv"):
+            if Path(candidate).is_file():
+                uv = candidate
+                break
+    if uv is None:
+        return
+    project = Path(__file__).resolve().parent
+    if not (project / "pyproject.toml").is_file():
+        return
+    env = dict(os.environ)
+    env["_BI_AI_UI_BOOTSTRAPPED"] = "1"
+    argv = [
+        uv,
+        "run",
+        "--project",
+        str(project),
+        "python",
+        str(Path(__file__).resolve()),
+        *sys.argv[1:],
+    ]
+    try:
+        os.execvpe(uv, argv, env)
+    except OSError:
+        return
+
+
+_bootstrap_via_uv_if_needed()
+
+from dotenv import load_dotenv  # noqa: E402
 
 # Load agent/.env BEFORE importing graph — anything reading
 # OPENROUTER_API_KEY / TEXT_MODEL must see the file's values (starter order).
