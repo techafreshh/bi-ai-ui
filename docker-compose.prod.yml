@@ -1,0 +1,22 @@
+# Issue #88: prod override — static dist/ via nginx on :80, no dev tooling.
+services:
+  web:
+    build:
+      context: ./web
+      target: production
+      args:
+        # Vite inlines VITE_* at build time, so the agent URL must arrive
+        # as a build arg here (there is no runtime env read in prod).
+        VITE_AGENT_URL: ${VITE_AGENT_URL:-http://localhost:8123/copilotkit}
+    ports: !override ["${WEB_HOST_PORT:-8080}:80"]
+    depends_on:
+      agent:
+        condition: service_healthy
+    # BusyBox wget probe (no new packages): nginx serves / with 200.
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
