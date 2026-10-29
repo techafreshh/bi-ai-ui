@@ -351,22 +351,33 @@ def run_checks(start=None, end=None, *, window=None):
     return [_result(name, *metrics[name]) for name in _CHECK_NAMES]
 
 
-def _latest_dirty_run(iso_days):
-    """The contiguous calendar-day run ending at the latest dirty day, as a
+def _latest_dirty_run(iso_days, max_gap_days=7):
+    """The dirty-day run ending at the latest dirty day, as a
     (start_iso, end_iso) pair — or None when no days are given. Pure: feeds
     from the detection scan's own day strings, cloning _require_date's
     validation so a non-ISO day raises ValueError before any range math.
-    Clipping to the contiguous tail keeps the reported window anchored on
-    the LIVE problem: dirty days that a clean day separates from the tail
-    are older dirt, not the scope this module claims."""
+    Walking back bridges clean gaps of up to `max_gap_days` days, so sparse
+    dirt (a dup day and a null day days apart) still scopes to one window
+    instead of clipping to a single clean-reading day; dirt separated by a
+    longer silence stays older dirt, not the scope this module claims."""
     days = sorted(_require_date(day, "dirty day") for day in iso_days)
     if not days:
         return None
     end = date.fromisoformat(days[-1])
     start = end
     remaining = set(days)
-    while (start - timedelta(days=1)).isoformat() in remaining:
-        start -= timedelta(days=1)
+    while True:
+        # The nearest dirty day back, when one sits within the bridgeable
+        # gap; a longer silence ends the walk at the live problem's start.
+        previous = None
+        for gap in range(1, max_gap_days + 1):
+            candidate = start - timedelta(days=gap)
+            if candidate.isoformat() in remaining:
+                previous = candidate
+                break
+        if previous is None:
+            break
+        start = previous
     return start.isoformat(), end.isoformat()
 
 

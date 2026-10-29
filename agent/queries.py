@@ -74,7 +74,7 @@ agent's model dependencies.
 
 import calendar
 import os
-from datetime import date
+from datetime import date, timedelta
 
 try:  # package-style entry (import agent.queries from the repo root)
     from agent import db
@@ -320,6 +320,19 @@ WHERE s.event_type = 'cancel'
   AND s.event_date BETWEEN ? AND ?
 """
 
+# Cancel counts per calendar month over a trailing range: the winning month
+# (most cancels, ties broken to the latest) is the spike window a
+# period-less churn question means. Params: (range_start, range_end).
+_SQL_CANCELS_BY_MONTH = """
+SELECT substr(event_date, 1, 7) AS month, COUNT(*) AS n
+FROM subscription_events
+WHERE event_type = 'cancel'
+  AND event_date BETWEEN ? AND ?
+GROUP BY month
+ORDER BY n DESC, month DESC
+LIMIT 1
+"""
+
 # Latest event day across all three event tables: per-table MAX rides the
 # event_date indexes, the outer MAX folds the three candidates (the same
 # union-MAX shape quality.py uses for its default scope). Params: none.
@@ -486,6 +499,33 @@ def latest_event_date():
         return conn.execute(_SQL_LATEST_EVENT_DATE).fetchone()[0]
     finally:
         conn.close()
+
+
+def spike_month_window(data_end, lookback_days=120):
+    """The calendar month holding the most 'cancel' events over the trailing
+    `lookback_days` (>= 1) ending at `data_end`, as a (first, last) ISO pair
+    — the window a period-less churn question (issue #86) means when the
+    fallback quarter would miss the spike. Ties break to the latest month
+    so the reading stays deterministic whatever the mix. `data_end` must
+    be an ISO date (ValueError otherwise, before any SQL runs); a range
+    with no cancels at all reads None so the caller keeps its own window."""
+    data_end = _require_date(data_end, "data_end")
+    _require_int_at_least(lookback_days, "lookback_days", 1)
+    range_start = (
+        date.fromisoformat(data_end) - timedelta(days=lookback_days - 1)
+    ).isoformat()
+    conn = db.connect(readonly=True)
+    try:
+        row = conn.execute(
+            _SQL_CANCELS_BY_MONTH, (range_start, data_end)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    year, month = int(row[0][:4]), int(row[0][5:7])
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{row[0]}-01", f"{row[0]}-{last_day:02d}"
 
 
 def churn_cohort(window, limit=None):
