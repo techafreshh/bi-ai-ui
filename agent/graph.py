@@ -3,13 +3,15 @@ state to CopilotKit (issue #10).
 
     START → read_state → decide → layout → query → fill → END
 
-  * read_state — DB aggregates + data-quality stats into `snapshot`:
-    window-scoped KPIs (current + previous quarter, via queries.py), the
-    data-quality checks scoped to the detected anomaly window
-    (snapshot["dq_scope"], issue #17 — trailing-30 default when the data
-    reads clean) and the churn delta. A missing or unreadable DB degrades
-    into an empty-handed snapshot instead of raising — the graph must
-    complete wherever it runs.
+  * read_state — the active sandbox world's aggregates + data-quality
+    stats into `snapshot` (window-scoped KPIs via queries.py, anomaly-
+    scoped checks plus `snapshot["dq_scope"]`, the churn delta), stamped
+    with `snapshot["dataset_id"]` verbatim. The window anchors on the
+    active source's `latest_event_day` — never the wall clock or the legacy
+    default DB. With no active dataset the snapshot stays honest-empty
+    (`dataset_id: None`, `empty: True`) without opening any DB; a missing
+    or unreadable active DB degrades into an empty-handed snapshot instead
+    of raising — the graph must complete wherever it runs.
   * decide — questions.build_question_set's fixed catalog question set,
     fanned out through DecisionClient.decide (the #8 seam) over the wired
     transport (#9's OpenRouter chain when a key is configured, the
@@ -65,7 +67,7 @@ from typing_extensions import Annotated, NotRequired, TypedDict
 
 try:  # package-style entry (import agent.graph from the repo root)
     from agent import catalog, quality, queries, questions
-    from agent.data import SqliteSource
+    from agent.data import PostgresSource, SqliteSource, use_postgres
     from agent.data.protocol import Source
     from agent.decision import client as decision_client
     from agent.decision.heuristic import HeuristicTransport, classify
@@ -74,7 +76,7 @@ except ModuleNotFoundError:  # script-style entry (tests, server.py from agent/)
     import quality
     import queries
     import questions
-    from data import SqliteSource
+    from data import PostgresSource, SqliteSource, use_postgres
     from data.protocol import Source
     from decision import client as decision_client
     from decision.heuristic import HeuristicTransport, classify
@@ -283,34 +285,63 @@ def reset_decision_client() -> None:
 
 
 async def read_state(state: AgentState) -> dict:
-    """Aggregate the DB facts the rest of the run works from.
+    """Aggregate the active dataset's facts the rest of the run works from.
 
-    Resolves the display window from the user text against the data's own
-    latest event day, then loads window-scoped KPIs (current + previous
-    quarter) and the decision-context quality stats (default-scope DQ
-    checks + churn delta at the window's end). A missing or unreadable DB
-    degrades: the snapshot stays JSON-shaped with `degraded: True` and the
-    window falls back to the wall-clock anchor's latest complete quarter."""
+    The single-active sandbox world (`datasets.get_active()`) scopes every
+    read: the window anchors on the active source's own latest event day —
+    the live Postgres source when `"postgres"` is active, else the active
+    sandbox file — never the wall clock or the legacy default DB. With no
+    active dataset the snapshot stays honest-empty (`dataset_id: None`,
+    `empty: True`) without opening any DB, so rows can never leak across
+    datasets; the downstream nodes short-circuit on the flag. Aggregates
+    (window-scoped KPIs, decision-context DQ checks, churn delta) ride the
+    queries/quality seam, which resolves the same active path. An
+    unreadable active DB degrades: the snapshot stays JSON-shaped with
+    `degraded: True` and the window falls back to the wall-clock anchor's
+    latest complete quarter."""
+    try:  # function-local so importing graph never touches the registry
+        # (mirrors db._registry_active_path's cycle-avoiding idiom).
+        try:  # package-style entry (import agent.graph from the repo root)
+            from agent import datasets
+        except ModuleNotFoundError:  # script-style entry (tests, server.py)
+            import datasets  # type: ignore[no-redef]
+        active_id = datasets.get_active()
+    except Exception:  # noqa: BLE001 - registry trouble reads as no dataset
+        active_id = None
     user_text = _last_user_text(state.get("messages") or [])
     snapshot: dict = {
         "query": user_text,
-        "degraded": False,
+        # The sandbox world this run reads: the active id verbatim
+        # ("postgres" included), None when no dataset is active.
+        "dataset_id": active_id,
+        # Honest-empty: no active dataset means no world to query.
+        "empty": active_id is None,
+        "degraded": active_id is None,
         "data_end": None,
         "investigate": _is_investigate(user_text),
         # Issue #17: the detected anomaly window — None until (and unless)
         # the aggregates below prove the data is dirty somewhere recent, so
         # degraded runs carry the key with its 'no anomaly' value.
         "dq_scope": None,
+        "window": None,
     }
+    if active_id is None:
+        # No world to query: return without opening any DB — the downstream
+        # nodes short-circuit on snapshot["empty"] and the run still
+        # completes with the honest-empty shape.
+        return {"snapshot": snapshot, "status": STATUSES["read_state"]}
 
     data_end = None
     window = None
     try:
         # The data_end anchor resolves through the Source protocol — never
-        # a direct DB read — so a Postgres Source slots in with no graph
-        # change; an unreadable source degrades (data_end stays None)
-        # instead of raising.
-        source: Source = SqliteSource()
+        # a direct DB read — scoped to the single active world; an
+        # unreadable source degrades (data_end stays None) instead of
+        # raising.
+        if active_id == "postgres" and use_postgres():
+            source: Source = PostgresSource()
+        else:
+            source = SqliteSource(datasets.active_path())
         data_end = source.latest_event_day()
         window = questions.resolve_window(user_text, data_end=data_end)
     except Exception as exc:  # noqa: BLE001 - DB problems degrade, never raise
@@ -397,6 +428,10 @@ async def decide(state: AgentState) -> dict:
     client (which cannot fail), keeping `decisions` a non-empty list of at
     most 7 entries."""
     snapshot = state.get("snapshot") or {}
+    if snapshot.get("empty"):
+        # Honest-empty: no world was read, so no transport is consulted —
+        # the Investigate prefix contract is ignored on this path.
+        return {"decisions": [], "status": STATUSES["decide"]}
     user_text = snapshot.get("query") or _last_user_text(state.get("messages") or [])
     question_set = questions.build_question_set(user_text, snapshot)
 
@@ -749,6 +784,11 @@ async def layout(state: AgentState) -> dict:
     Investigate follow-ups (issue #16) never run the cut: their drill-down
     layout is CTA-authored, built and validated directly."""
     snapshot = state.get("snapshot") or {}
+    if snapshot.get("empty"):
+        # Honest-empty: the degraded snapshot becomes the empty layout —
+        # a validated empty-items a2ui, never the single-insight fallback.
+        empty_model = catalog.A2UILayout.model_validate({"items": []}).model_dump()
+        return {"a2ui": empty_model, "status": STATUSES["layout"]}
     if snapshot.get("investigate"):
         try:
             layout_model = _build_investigate_layout(snapshot)
@@ -902,12 +942,16 @@ async def query(state: AgentState) -> dict:
     re-validated before storing. Per-slot failures (unreadable DB, empty
     window) keep that slot's existing props; a re-validation failure keeps
     the whole pre-query layout — the streamed a2ui never regresses."""
+    snapshot = state.get("snapshot") or {}
+    if snapshot.get("empty"):
+        # Honest-empty: no slots to refresh — the empty a2ui rides through
+        # untouched, no churn_driver and no per-slot SQL ever runs.
+        return {"status": STATUSES["query"]}
     layout_model = state.get("a2ui")
     if not isinstance(layout_model, dict) or not isinstance(
         layout_model.get("items"), list
     ):
         return {"status": STATUSES["query"]}
-    snapshot = state.get("snapshot") or {}
     window = _snapshot_dict(snapshot, "window")
     start, end = window.get("start"), window.get("end")
     driver = None
@@ -1111,6 +1155,33 @@ async def fill(state: AgentState) -> dict:
     (including the lazy missing-key raise) degrades to the deterministic
     copy, keeping the run — and its streamed a2ui — green."""
     snapshot = state.get("snapshot") or {}
+    if snapshot.get("empty"):
+        # Honest-empty: the fixed chat string, no model call — the adapter
+        # ends the SSE run with RUN_FINISHED carrying this summary. The DQ
+        # diagnostics slot is skipped: no data_quality_card survives the
+        # empty layout, so there is no key to stamp.
+        copy = {"summary": "load a dataset first"}
+        layout_model = state.get("a2ui")
+        if not isinstance(layout_model, dict):
+            layout_model = catalog.A2UILayout.model_validate(
+                {"items": []}
+            ).model_dump()
+        a2ui = {
+            **layout_model,
+            "slotCopy": {**layout_model.get("slotCopy", {}), **copy},
+        }
+        try:
+            catalog.A2UILayout.model_validate(a2ui)
+        except ValidationError as exc:
+            logger.warning(
+                "fill: copy update invalid (%s); keeping prior layout", exc
+            )
+            a2ui = layout_model
+        return {
+            "messages": [AIMessage(content=copy["summary"])],
+            "a2ui": a2ui,
+            "status": STATUSES["fill"],
+        }
     layout_model = state.get("a2ui")
     if not isinstance(layout_model, dict):
         layout_model = catalog.fallback_layout().model_dump()

@@ -25,11 +25,30 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import HumanMessage
 
 import catalog
+import datasets
 import db
 import graph as agent_graph
 from decision.client import DecisionClient, MockTransport
 
 Q3_RANGE = "2026-07-01..2026-09-30"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _active_seed(seeded_db):
+    """Issue #85 rescoped the graph to the single-active dataset: activate
+    the module seed so SSE runs read it (nothing else in this module
+    touches the registry; save/restore keeps the id out of later
+    modules)."""
+    saved_by_id = dict(datasets._BY_ID)
+    saved_active = datasets._ACTIVE_ID
+    datasets.register("seeded", seeded_db, "sample")
+    assert datasets.set_active("seeded")
+    try:
+        yield
+    finally:
+        datasets._BY_ID.clear()
+        datasets._BY_ID.update(saved_by_id)
+        datasets._ACTIVE_ID = saved_active
 
 
 def _heuristic_client():
@@ -304,15 +323,20 @@ def test_every_streamed_a2ui_passes_layout_validation(seeded_db, monkeypatch):
         catalog.A2UILayout.model_validate(a2ui)  # raises on any violation
 
     # Degraded state: the layout node must emit a validating fallback even
-    # when the decider endorses components it cannot build data for.
+    # when the decider endorses components it cannot build data for. The
+    # registry active id is cleared as well so the run is genuinely empty
+    # (no active dataset) rather than shadowed by the module seed.
     with_db = db.DEFAULT_DB_PATH
+    saved_active = datasets._ACTIVE_ID
     db.DEFAULT_DB_PATH = Path("/nonexistent/data/app.db")
+    datasets._ACTIVE_ID = None
     try:
         _, degraded_snapshots = _run_sse(
             monkeypatch, message="Show me churn and sales for Q3"
         )
     finally:
         db.DEFAULT_DB_PATH = with_db
+        datasets._ACTIVE_ID = saved_active
     for a2ui in _emitted_a2ui(degraded_snapshots):
         catalog.A2UILayout.model_validate(a2ui)
 
@@ -552,11 +576,14 @@ def test_read_state_stores_dq_scope_and_scopes_dq_checks(seeded_db):
 
 
 def test_read_state_dq_scope_is_none_on_a_missing_db(tmp_path):
-    """Degrade contract: an unreadable DB leaves dq_scope None (and the
-    snapshot degraded) instead of raising — the anomaly detection never
-    breaks the run."""
+    """Degrade contract: no active dataset leaves dq_scope None (and the
+    snapshot degraded + empty) instead of raising — the anomaly detection
+    never breaks the run. The registry active id is cleared as well so the
+    module seed cannot shadow the missing path."""
     original = db.DEFAULT_DB_PATH
+    saved_active = datasets._ACTIVE_ID
     db.DEFAULT_DB_PATH = tmp_path / "missing.db"
+    datasets._ACTIVE_ID = None
     try:
         result = asyncio.run(
             agent_graph.read_state(
@@ -565,6 +592,7 @@ def test_read_state_dq_scope_is_none_on_a_missing_db(tmp_path):
         )
     finally:
         db.DEFAULT_DB_PATH = original
+        datasets._ACTIVE_ID = saved_active
     assert result["snapshot"]["degraded"] is True
     assert result["snapshot"]["dq_scope"] is None
 
@@ -573,25 +601,83 @@ def test_read_state_dq_scope_is_none_on_a_missing_db(tmp_path):
 
 
 def test_graph_completes_without_db_or_key(monkeypatch, tmp_path):
-    """Degrade contract: with the DB pointed at a nonexistent path and no
-    OPENROUTER_API_KEY, the graph still completes — degraded snapshot, 1..7
-    decisions, a validating a2ui, status 'done' — and never raises out of
-    the run. This replaces the deleted single-node chat test in
-    test_server.py: fill's missing-key failure degrades to deterministic
-    copy instead of failing the run."""
+    """Degrade contract: with the ACTIVE dataset pointed at a nonexistent
+    file and no OPENROUTER_API_KEY, the graph still completes — degraded
+    snapshot stamped with the active id, 1..7 decisions, a validating a2ui,
+    status 'done' — and never raises out of the run. This replaces the
+    deleted single-node chat test in test_server.py: fill's missing-key
+    failure degrades to deterministic copy instead of failing the run."""
+    missing_id = "missing-probe"
+    saved_by_id = dict(datasets._BY_ID)
+    saved_active = datasets._ACTIVE_ID
+    datasets.register(missing_id, tmp_path / "missing.db", "upload")
+    assert datasets.set_active(missing_id)
     original_db_path = db.DEFAULT_DB_PATH
     db.DEFAULT_DB_PATH = tmp_path / "missing.db"
     try:
         raw, snapshots = _run_sse(monkeypatch)
     finally:
         db.DEFAULT_DB_PATH = original_db_path
+        datasets._BY_ID.clear()
+        datasets._BY_ID.update(saved_by_id)
+        datasets._ACTIVE_ID = saved_active
 
     assert "RUN_FINISHED" in raw
     final = _final_state(snapshots)
     assert final["status"] == agent_graph.STATUSES["fill"] == "done"
     assert final["snapshot"]["degraded"] is True
+    assert final["snapshot"]["dataset_id"] == missing_id
     catalog.A2UILayout.model_validate(final["a2ui"])
     assert 1 <= len(final["decisions"]) <= 7
+
+
+# --- Issue #85: agent rescope — active dataset + honest empty -----------------
+
+
+def test_empty_active_returns_load_dataset_first(seeded_db, monkeypatch):
+    """No active dataset: the run still ends RUN_FINISHED, but
+    honest-empty — decisions[] is empty, the snapshot stamps dataset_id
+    None, the streamed a2ui carries no items, and the chat closes with the
+    fixed 'load a dataset first' string."""
+    saved_active = datasets._ACTIVE_ID
+    datasets._ACTIVE_ID = None
+    try:
+        raw, snapshots = _run_sse(monkeypatch, message="Show me sales in Q3")
+    finally:
+        datasets._ACTIVE_ID = saved_active
+
+    assert "RUN_FINISHED" in raw
+    assert "load a dataset first" in raw
+    final = _final_state(snapshots)
+    assert final["status"] == agent_graph.STATUSES["fill"] == "done"
+    assert final["snapshot"]["dataset_id"] is None
+    assert final["snapshot"]["empty"] is True
+    assert final["decisions"] == []
+    assert final["a2ui"]["items"] == []
+    assert final["messages"][-1]["content"] == "load a dataset first"
+
+
+def test_active_snapshot_carries_dataset_id(seeded_db, monkeypatch):
+    """An explicitly activated sandbox scopes the run: the streamed snapshot
+    stamps snapshot.dataset_id with the active id verbatim, and the canvas
+    opens with the heuristic sales route's kpi_row/line_chart."""
+    probe_id = "scoped-probe"
+    saved_by_id = dict(datasets._BY_ID)
+    saved_active = datasets._ACTIVE_ID
+    datasets.register(probe_id, seeded_db, "sample")
+    assert datasets.set_active(probe_id)
+    try:
+        raw, snapshots = _run_sse(monkeypatch, message="Show me sales in Q3")
+    finally:
+        datasets._BY_ID.clear()
+        datasets._BY_ID.update(saved_by_id)
+        datasets._ACTIVE_ID = saved_active
+
+    assert "RUN_FINISHED" in raw
+    final = _final_state(snapshots)
+    assert final["snapshot"]["dataset_id"] == probe_id
+    assert final["snapshot"]["empty"] is False
+    assert final["a2ui"]["items"][0]["type"] in ("kpi_row", "line_chart")
 
 
 def test_status_advances_through_the_five_nodes(seeded_db, monkeypatch):

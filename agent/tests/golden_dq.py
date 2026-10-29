@@ -37,6 +37,7 @@ from ag_ui.encoder import EventEncoder
 from copilotkit import LangGraphAGUIAgent
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
+import datasets
 import db
 import graph as agent_graph
 from decision.client import DecisionClient
@@ -72,10 +73,19 @@ def _seeded_db(request, seeded_db_path):
     del request  # autouse-only: every test in this module needs the seed
     original = db.DEFAULT_DB_PATH
     db.DEFAULT_DB_PATH = seeded_db_path
+    # Issue #85: the graph only reads the active dataset — activate the
+    # seed for the test, then restore the registry with the path default.
+    saved_by_id = dict(datasets._BY_ID)
+    saved_active = datasets._ACTIVE_ID
+    datasets.register("seeded", seeded_db_path, "sample")
+    datasets.set_active("seeded")
     try:
         yield seeded_db_path
     finally:
         db.DEFAULT_DB_PATH = original
+        datasets._BY_ID.clear()
+        datasets._BY_ID.update(saved_by_id)
+        datasets._ACTIVE_ID = saved_active
 
 
 def _run_sse(monkeypatch, message=MESSAGE):

@@ -13,6 +13,25 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 import graph as agent_graph
 
+
+@pytest.fixture(scope="module", autouse=True)
+def _active_seed(seeded_db):
+    """Issue #85 rescoped the graph to the single-active dataset: activate
+    the module seed so the pipeline runs exercise fill's model call
+    instead of the honest-empty short-circuit."""
+    import datasets
+
+    saved_by_id = dict(datasets._BY_ID)
+    saved_active = datasets._ACTIVE_ID
+    datasets.register("seeded", seeded_db, "sample")
+    assert datasets.set_active("seeded")
+    try:
+        yield
+    finally:
+        datasets._BY_ID.clear()
+        datasets._BY_ID.update(saved_by_id)
+        datasets._ACTIVE_ID = saved_active
+
 AGENT_NAME = "bi_agent"
 
 FAKE_REPLY = "pong"
