@@ -47,7 +47,11 @@ services:
     restart: unless-stopped
 
   web:
-    build: ./web
+    # Issue #88: dev path pins the development stage (Vite HMR on :5173);
+    # prod override (docker-compose.prod.yml) switches target to production.
+    build:
+      context: ./web
+      target: development
     ports:
       - "${WEB_HOST_PORT:-5173}:5173"
     environment:
