@@ -201,11 +201,12 @@ _UPLOAD_MAX_MB_FALLBACK = "25"
 # via the environment without reimporting the server.
 _SQL_ROW_LIMIT_FALLBACK = "50"
 
-# Blocked-write keywords for POST /data/query (issue #83): any word-boundary
+# Blocked-write keywords for POST /data/query (issues #83, #84): any word-boundary
 # hit means the statement can mutate or probe the sandbox, so the route
 # answers 400 {"error": "blocked ..."} before opening a connection.
 _QUERY_BLOCKED_RE = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|PRAGMA)\b",
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|PRAGMA"
+    r"|VACUUM|REINDEX|REPLACE|TRUNCATE|GRANT|REVOKE)\b",
     re.IGNORECASE,
 )
 
