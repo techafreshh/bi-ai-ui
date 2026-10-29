@@ -27,11 +27,20 @@ from pathlib import Path
 import pytest
 
 AGENT_DIR = Path(__file__).resolve().parents[1]
+TESTS_DIR = Path(__file__).resolve().parent
 GENERATOR = AGENT_DIR / "scripts" / "generate_data.py"
 RUN_TIMEOUT_SECONDS = 600
 
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
+# Sibling helper modules (quality_fixture, test_generate_data) are imported
+# bare (`from quality_fixture import ...`): with tests/ a real package
+# (issue #91: disambiguates tests.test_source_contract from the
+# agent/test_source_contract.py shim so `pytest agent` collects both),
+# pytest no longer prepends tests/ itself, so the bootstrap does it here.
+# Only tests/ — never the repo root (the dual-module seam above still holds).
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
 
 import db  # noqa: E402  (needs the sys.path bootstrap above)
 
