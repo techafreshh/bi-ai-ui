@@ -3,6 +3,7 @@ import { HttpAgent } from "@ag-ui/client";
 import "@copilotkit/react-core/v2/styles.css";
 import { DashboardCanvas } from "./components/DashboardCanvas";
 import { MetricPicker } from "./components/manual/MetricPicker";
+import { SqlBox } from "./components/manual/SqlBox";
 import { DatasetPicker } from "./components/datasets/DatasetPicker";
 import { DecisionDrawer } from "./components/DecisionDrawer";
 import { ThemeToggle } from "./components/ui/theme-toggle";
@@ -46,6 +47,7 @@ function AppShell() {
       <InvestigateProvider agentId={AGENT_ID}>
         <main className="flex-1 p-8">
           <MetricPicker />
+          <SqlBox />
           <DashboardCanvas
             onLoaded={() => setDatasetRefresh((count) => count + 1)}
           />

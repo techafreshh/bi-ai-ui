@@ -51,6 +51,36 @@ export type RunMetricResult =
   // card (verbatim server message) and transport errors to an inline note.
   | { ok: false; error: string; status?: number };
 
+// Issue #84: hand-driven SQL-box client types. POST {sql} to the guarded
+// POST /data/query endpoint (issue #83); 200 is {columns, rows} with rows
+// as lists (cursor tuples) or dicts, 400 bodies are `{error: string}` and
+// surface as error-as-string. Never throws.
+export type RunSqlResult =
+  | { ok: true; columns: string[]; rows: Record<string, unknown>[] }
+  // `status` is the HTTP status for server rejections and absent for
+  // transport failures, so the box can route 400s to an insight_text
+  // card (verbatim server message) and transport errors to an inline note.
+  | { ok: false; error: string; status?: number };
+
+function toTableRows(columns: string[], rows: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(rows)) return [];
+  return (rows as unknown[])
+    .map((row) => {
+      if (Array.isArray(row)) {
+        const obj: Record<string, unknown> = {};
+        columns.forEach((column, index) => {
+          obj[column] = (row as unknown[])[index] ?? null;
+        });
+        return obj;
+      }
+      if (row !== null && typeof row === "object") {
+        return row as Record<string, unknown>;
+      }
+      return { value: row };
+    })
+    .slice(0, 50);
+}
+
 async function readError(response: Response, fallback: string): Promise<string> {
   try {
     const payload: unknown = await response.json();
@@ -96,6 +126,78 @@ export async function runMetric(args: RunMetricArgs): Promise<RunMetricResult> {
     return {
       ok: false,
       error: "manual run failed: invalid response",
+      status: response.status,
+    };
+  }
+}
+
+// POST {apiBase()}/data/query {sql} — the exact issue-#83 SQL-box
+// contract. Never throws: failures return error-as-string. List rows
+// (cursor tuples) are mapped to dicts keyed by columns so the result
+// feeds the existing data_table component verbatim; dict rows pass
+// through untouched. The client-side 50-row slice keeps the layout
+// inside the catalog's rows cap whatever SQL_ROW_LIMIT the server ran.
+export async function runSql(sql: string): Promise<RunSqlResult> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase()}/data/query`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sql }),
+    });
+  } catch {
+    return { ok: false, error: "sql run failed: network error" };
+  }
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: await readError(response, "sql run failed"),
+      status: response.status,
+    };
+  }
+  try {
+    const payload: unknown = await response.json();
+    if (
+      payload === null ||
+      typeof payload !== "object" ||
+      Array.isArray(payload)
+    ) {
+      return {
+        ok: false,
+        error: "sql run failed: invalid response",
+        status: response.status,
+      };
+    }
+    const { columns, rows } = payload as {
+      columns?: unknown;
+      rows?: unknown;
+    };
+    if (
+      !Array.isArray(columns) ||
+      !columns.every((column) => typeof column === "string")
+    ) {
+      return {
+        ok: false,
+        error: "sql run failed: invalid response",
+        status: response.status,
+      };
+    }
+    if (!Array.isArray(rows)) {
+      return {
+        ok: false,
+        error: "sql run failed: invalid response",
+        status: response.status,
+      };
+    }
+    return {
+      ok: true,
+      columns: columns as string[],
+      rows: toTableRows(columns as string[], rows),
+    };
+  } catch {
+    return {
+      ok: false,
+      error: "sql run failed: invalid response",
       status: response.status,
     };
   }
