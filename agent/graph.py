@@ -347,6 +347,23 @@ async def read_state(state: AgentState) -> dict:
     except Exception as exc:  # noqa: BLE001 - DB problems degrade, never raise
         logger.error("read_state: data read failed (%s); degrading snapshot", exc)
         snapshot["degraded"] = True
+    if window is not None and data_end is not None:
+        # Period-less churn questions (issue #86): the fallback quarter can
+        # sit off the spike (a September anchor falls back to Q2), so the
+        # window becomes the month holding the most cancels in the trailing
+        # 120 days — the data's own spike month. An explicit period keeps
+        # its literal window; any failure keeps the resolved one.
+        try:
+            if classify(user_text) == "churn" and not questions.has_explicit_period(
+                user_text
+            ):
+                spike = queries.spike_month_window(data_end)
+                if spike is not None:
+                    window = spike
+        except Exception:  # noqa: BLE001 - keep the resolved window
+            logger.warning(
+                "read_state: spike-month override failed; keeping resolved window"
+            )
     if window is None:
         # No readable DB: the anchor degrades to the wall clock so the run
         # still carries a well-formed window.

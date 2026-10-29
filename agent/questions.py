@@ -236,9 +236,26 @@ def resolve_window(text, *, data_end):
     start, end = bounds(year, quarter)
     if explicit_year is None and end > anchor.isoformat():
         # Unpinned and still incomplete relative to the data: back off one
-        # year to the latest complete occurrence of this period.
-        start, end = bounds(year - 1, quarter)
+        # year to the latest complete occurrence of this period — unless the
+        # anchor day already lies inside this year's occurrence (a September
+        # anchor asking for Q3 means Q3 of the anchor year, not last year's).
+        if not (start <= anchor.isoformat() <= end):
+            start, end = bounds(year - 1, quarter)
     return start, end
+
+
+def has_explicit_period(text):
+    """True when the message names an explicit period: an ISO date range,
+    a quarter (Q1..Q4) or a month name — the same three templates
+    resolve_window scans, so callers deciding whether the user pinned the
+    window stay consistent with the window the user actually gets."""
+    if not text:
+        return False
+    return bool(
+        _RANGE_RE.search(text)
+        or _QUARTER_RE.search(text)
+        or _MONTH_RE.search(text)
+    )
 
 
 def compact_snapshot_summary(snapshot):

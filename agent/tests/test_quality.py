@@ -283,11 +283,10 @@ def test_recent_problem_scope_lookback_excludes_old_plants(tmp_path, monkeypatch
 
 
 def test_recent_problem_scope_run_and_majority_segment(tmp_path, monkeypatch):
-    """The reported scope is the contiguous dirty-day run ending at the
-    latest dirty day, with the majority segment OF that run: Startup dup
-    rows on Sept 8-9 and Growth dup rows on Sept 12 (Sept 10-11 clean)
-    scope to Sept 12 alone, segment Growth — the older Startup days sit
-    outside the contiguous tail and must not label the window."""
+    """The reported scope bridges short clean gaps (issue #86): Startup dup
+    rows on Sept 8-9 and Growth dup rows on Sept 12 (Sept 10-11 clean, a
+    2-day gap) scope to Sept 8-12 together, with the majority segment OF
+    that bridged run — Startup (two dup extras) over Growth (one)."""
     rows = [
         (1, "2026-09-08", USAGE_METRIC, 100),
         (1, "2026-09-08", USAGE_METRIC, 100),
@@ -300,9 +299,9 @@ def test_recent_problem_scope_run_and_majority_segment(tmp_path, monkeypatch):
     db_path = build_fixture(tmp_path / "mixed.db", rows, segments)
     monkeypatch.setattr(db, "DEFAULT_DB_PATH", db_path)
     assert quality.recent_problem_scope() == {
-        "start": "2026-09-12",
+        "start": "2026-09-08",
         "end": "2026-09-12",
-        "segment": "Growth",
+        "segment": "Startup",
     }
 
 
@@ -316,27 +315,33 @@ def test_recent_problem_scope_validates_lookback_days(seeded_db):
 
 
 def test_latest_dirty_run_takes_the_contiguous_tail():
-    """Pure contiguity clipper: the run ENDS at the latest dirty day and
-    walks back only across back-to-back dirty days — a clean day breaks the
-    walk (older dirt is excluded), a single day scopes to itself, empty
-    input reads None and non-ISO entries raise ValueError."""
+    """Gap-tolerant tail clipper (issue #86): the run ENDS at the latest
+    dirty day and walks back across clean gaps of up to 7 days — sparse
+    dirt stays one window instead of clipping to a single clean-reading
+    day. A silence longer than 7 days still breaks the walk (older dirt is
+    excluded); a single day scopes to itself, empty input reads None and
+    non-ISO entries raise ValueError."""
     # Full run: every day from the 8th to the 21st is dirty.
     full = [
         (date(2026, 9, 8) + timedelta(days=offset)).isoformat()
         for offset in range(14)
     ]
     assert quality._latest_dirty_run(full) == ("2026-09-08", "2026-09-21")
-    # A clean Sept 10-11 pair splits the days: the tail run is the 12th on.
+    # A clean Sept 10-11 pair (a 2-day gap) is bridged: the run starts on
+    # the 8th, not the 12th.
     split = [
         "2026-09-08", "2026-09-09",
         "2026-09-12", "2026-09-13", "2026-09-14",
     ]
-    assert quality._latest_dirty_run(split) == ("2026-09-12", "2026-09-14")
-    # Order and duplicates in the input do not matter; a clean day between
-    # dirty days still breaks the run (Sept 13 is clean), and one day is
-    # its own run.
+    assert quality._latest_dirty_run(split) == ("2026-09-08", "2026-09-14")
+    # Order and duplicates in the input do not matter; a 2-day gap (Sept
+    # 13 clean) is still bridged, and one day is its own run.
     assert quality._latest_dirty_run(
         ["2026-09-14", "2026-09-12", "2026-09-12"]
+    ) == ("2026-09-12", "2026-09-14")
+    # A 13-day silence is older dirt: the walk ends at the live problem.
+    assert quality._latest_dirty_run(
+        ["2026-09-01", "2026-09-14"]
     ) == ("2026-09-14", "2026-09-14")
     assert quality._latest_dirty_run(["2026-09-08"]) == ("2026-09-08", "2026-09-08")
     assert quality._latest_dirty_run([]) is None

@@ -46,6 +46,33 @@ def test_unpinned_month_backs_off_to_latest_complete():
     ) == ("2026-09-01", "2026-09-30")
 
 
+def test_anchor_inside_period_keeps_anchor_year():
+    """Issue #86: a year-omitted period whose current-year occurrence already
+    contains the anchor day keeps the anchor year — a September anchor
+    asking for Q3 means Q3 of that year, not last year's backoff. The
+    out-of-period backoff (December at a September anchor) is untouched."""
+    assert questions.resolve_window(
+        "Show me sales in Q3", data_end="2026-09-14"
+    ) == ("2026-07-01", "2026-09-30")
+    assert questions.resolve_window(
+        "revenue in September", data_end="2026-09-14"
+    ) == ("2026-09-01", "2026-09-30")
+    assert questions.resolve_window(
+        "December sales", data_end="2026-09-14"
+    ) == ("2025-12-01", "2025-12-31")
+
+
+def test_has_explicit_period_names_only_pinned_windows():
+    """Issue #86: the churn override's guard — ranges, quarters and month
+    names read True; bare churn/clean questions with no period read False."""
+    assert questions.has_explicit_period("Show me sales in Q3")
+    assert questions.has_explicit_period("Why did churn spike in August?")
+    assert questions.has_explicit_period("sales 2026-07-01..2026-09-15")
+    assert not questions.has_explicit_period("why did churn spike?")
+    assert not questions.has_explicit_period("Is the data clean?")
+    assert not questions.has_explicit_period("")
+
+
 def test_no_period_falls_back_to_complete_quarter_of_data_end():
     """No quarter/month in the message: the complete quarter containing
     data_end — or the one before it when data_end sits mid-quarter."""
