@@ -12,11 +12,18 @@ replaces (the idiom golden_q3.py documented before this consolidation).
 
 The generator subprocess body mirrors the runtime gate (the same call shape
 test_quality.py / test_queries.py carried before moving here — their single
-home now). The sys.path bootstrap adds ONLY agent/ (not the repo root): the
-agent modules dual-import db (package-style `from agent import db` first),
-and repo-root visibility would flip every bind to agent.db while the tests
-swap the top-level db module's DEFAULT_DB_PATH — two distinct module objects
-would leave the swap seam silently dead. tests.test_graph's namespace-package
+home now). The sys.path bootstrap adds ONLY agent/ (not the repo root) so the
+script-style `import db` branch stays reachable; but the repo root can still
+be visible anyway — `python -m pytest` prepends the cwd, and pytest's
+pythonpath rootdir handling may add it too — and then the agent modules'
+package-style `from agent import db` branch wins, binding agent.db while the
+tests swap the top-level db module: two distinct module objects that leave
+the swap seam silently dead (issue #91: 84 failed with `no such table`).
+The sys.modules unification below closes that seam whatever sys.path holds:
+importing the top-level stateful modules first and pointing agent.db /
+agent.datasets at the same objects, so every later `from agent import db`
+(server, queries, sandbox, sqlite_source, the lazy datasets/db lookups)
+returns the object the fixtures patch. tests.test_graph's namespace-package
 import resolves through agent/ alone.
 """
 
@@ -33,7 +40,21 @@ RUN_TIMEOUT_SECONDS = 600
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
+import datasets  # noqa: E402  (same bootstrap; unified below)
 import db  # noqa: E402  (needs the sys.path bootstrap above)
+
+# Single-object seam (issue #91): the stateful modules must be ONE object no
+# matter which import style reaches them first. `from agent import db` (every
+# agent module's preferred branch) consults sys.modules['agent.db'] before
+# executing anything, so pointing that entry at the already-imported
+# top-level module makes the package-style bind return the same object the
+# fixtures patch — whichever of the repo root / agent/ is on sys.path. Both
+# entries are stateful (db.DEFAULT_DB_PATH/SANDBOX_DIR, datasets._BY_ID /
+# _ACTIVE_ID/SANDBOX_DIR); every other dual import (queries, sandbox,
+# catalog, graph) is stateless or reads its db/datasets reference at call
+# time, so unifying these two closes the whole seam.
+sys.modules["agent.db"] = db
+sys.modules["agent.datasets"] = datasets
 
 
 @pytest.fixture(scope="session")

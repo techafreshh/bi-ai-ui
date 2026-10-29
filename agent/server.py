@@ -14,6 +14,7 @@ import argparse
 import logging
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import sys
@@ -21,7 +22,63 @@ import uuid
 from datetime import date
 from pathlib import Path
 
-from dotenv import load_dotenv
+
+def _bootstrap_via_uv_if_needed() -> None:
+    """Re-exec through `uv run` when the FastAPI stack is missing.
+
+    Factory harnesses launch the agent with the bare system python
+    (`/usr/bin/python3 server.py --port ...`), which has no third-party
+    packages. The repo's canonical env is the agent venv (`uv sync`);
+    when FastAPI is unimportable and `uv` exists, re-exec the same argv
+    under `uv run --project <agent_dir>` so the launch self-heals instead
+    of dying with `No module named uvicorn`. Only acts when this file is
+    the entry point (`python server.py ...`): plain imports (`import
+    server`, `uvicorn agent.server:app`) never re-exec, so test harnesses
+    keep the normal ImportError. Guarded by `_BI_AI_UI_BOOTSTRAPPED`
+    against re-exec loops; when `uv` is absent (or this is not the agent
+    project) fall through to the normal ImportError so the missing
+    dependency stays visible."""
+    if __name__ != "__main__":
+        return
+    if os.getenv("_BI_AI_UI_BOOTSTRAPPED"):
+        return
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+        return
+    except ImportError:
+        pass
+    uv = shutil.which("uv")
+    if uv is None:
+        for candidate in ("/usr/local/bin/uv", "/root/.local/bin/uv"):
+            if Path(candidate).is_file():
+                uv = candidate
+                break
+    if uv is None:
+        return
+    project = Path(__file__).resolve().parent
+    if not (project / "pyproject.toml").is_file():
+        return
+    env = dict(os.environ)
+    env["_BI_AI_UI_BOOTSTRAPPED"] = "1"
+    argv = [
+        uv,
+        "run",
+        "--project",
+        str(project),
+        "python",
+        str(Path(__file__).resolve()),
+        *sys.argv[1:],
+    ]
+    try:
+        os.execvpe(uv, argv, env)
+    except OSError:
+        return
+
+
+_bootstrap_via_uv_if_needed()
+
+from dotenv import load_dotenv  # noqa: E402
 
 # Load agent/.env BEFORE importing graph — anything reading
 # OPENROUTER_API_KEY / TEXT_MODEL must see the file's values (starter order).
@@ -580,20 +637,117 @@ def create_app() -> FastAPI:
             content={"error": f"unknown dataset {dataset_id!r}"},
         )
 
-    # Guarded SQL escape hatch (issue #83): exactly one leading SELECT,
-    # capped rows, read-only connection. Sequential validation mirrors the
-    # /data/run style — body shape, single-statement (`;`), leading
-    # SELECT, blocked keywords — each a 400 {"error"} before any I/O.
-    # Success runs wrapped as SELECT * FROM (<sql>) LIMIT <cap> over
-    # db.connect_ro() (mode=ro URI + SQL_TIMEOUT_S) and returns 200
-    # {"columns", "rows"}; every sqlite failure maps to 400 {"error"}.
+    # Guarded SQL escape hatch (issue #83) plus read-only metric leg
+    # (issue #91): one route, two shapes. A JSON body carrying a `sql`
+    # string takes the SQL hatch — exactly one leading SELECT, capped rows,
+    # read-only connection. A body carrying `metric`/`start`/`end` takes
+    # the metric leg — the GET /data/run validation idiom (missing
+    # params, metric whitelist via queries._METRIC_FUNCS, ISO dates via
+    # date.fromisoformat, start-after-end, active-dataset probe) returning
+    # 200 {"metric", "start", "end", "value"} via
+    # queries.metric_value (the `data_quality` value is the checks list
+    # verbatim). Sequential validation mirrors the /data/run style and
+    # every failure is 400 {"error"} before any I/O (a malformed JSON
+    # body is 400, never 422). The active-dataset probe (same
+    # queries.latest_event_date() try/except idiom as the /data/run
+    # handler) turns every unreadable dataset — missing file, missing
+    # tables, empty event history — into 400 "no active dataset" instead
+    # of leaking the raw sqlite error. SQL success runs wrapped as
+    # SELECT * FROM (<sql>) LIMIT <cap> over db.connect_ro() (mode=ro URI
+    # + SQL_TIMEOUT_S) and returns 200 {"columns", "rows"}; every sqlite
+    # failure maps to 400 {"error"}.
     @app.post("/data/query")
     async def run_query(request: Request):
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001 - any unparseable body is 400
             body = None
-        sql = body.get("sql") if isinstance(body, dict) else None
+        if not isinstance(body, dict):
+            return JSONResponse(
+                status_code=400, content={"error": "missing sql"}
+            )
+        sql = body.get("sql")
+        has_metric_shape = (
+            "metric" in body or "start" in body or "end" in body
+        )
+        if has_metric_shape and (
+            not isinstance(sql, str) or not sql.strip()
+        ):
+            metric = body.get("metric")
+            start = body.get("start")
+            end = body.get("end")
+            if metric is None or not str(metric).strip():
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "missing required query parameter: metric"},
+                )
+            if start is None or not str(start).strip():
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "missing required query parameter: start"},
+                )
+            if end is None or not str(end).strip():
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "missing required query parameter: end"},
+                )
+            metric = str(metric).strip()
+            start = str(start).strip()
+            end = str(end).strip()
+            if metric not in queries._METRIC_FUNCS:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": (
+                            f"unknown metric {metric!r}; must be one of "
+                            f"{sorted(queries._METRIC_FUNCS)}"
+                        )
+                    },
+                )
+            try:
+                canon_start = date.fromisoformat(start).isoformat()
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": f"window start is not a valid ISO date: {start!r}"
+                    },
+                )
+            try:
+                canon_end = date.fromisoformat(end).isoformat()
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"window end is not a valid ISO date: {end!r}"},
+                )
+            if canon_start > canon_end:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": (
+                            f"window start {canon_start} is after "
+                            f"window end {canon_end}"
+                        )
+                    },
+                )
+            start, end = canon_start, canon_end
+            try:
+                queries.latest_event_date()
+            except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+                return JSONResponse(
+                    status_code=400, content={"error": "no active dataset"}
+                )
+            try:
+                value = queries.metric_value(metric, start, end)
+            except ValueError as exc:
+                return JSONResponse(
+                    status_code=400, content={"error": str(exc)}
+                )
+            except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+                return JSONResponse(
+                    status_code=400, content={"error": "no active dataset"}
+                )
+            return {"metric": metric, "start": start, "end": end, "value": value}
         if not isinstance(sql, str) or not sql.strip():
             return JSONResponse(
                 status_code=400, content={"error": "missing sql"}
@@ -614,6 +768,12 @@ def create_app() -> FastAPI:
                 content={"error": "blocked: statement contains a blocked keyword"},
             )
         cap = _query_limit()
+        try:
+            queries.latest_event_date()
+        except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+            return JSONResponse(
+                status_code=400, content={"error": "no active dataset"}
+            )
         try:
             conn = db.connect_ro()
         except Exception:  # noqa: BLE001 - unreadable DB reads as empty

@@ -85,6 +85,19 @@ docker compose up
   canvas shows `No dataset loaded — upload CSV or load sample` until data
   exists. Generate one manually with `./scripts/reset_data.sh` (below).
 
+### Step 1 — load data first (upload-first)
+
+The canvas stays empty until a dataset exists. Pick one path — no rebuild,
+no restart:
+
+- Empty-state card: drop a CSV onto the upload dropzone (table is inferred
+  from the filename stem) or press **Load sample** — the dropzone uploads
+  via `POST /data/upload`, the sample button fires `POST /data/sample`.
+- Header DatasetPicker: the same upload / load-sample actions, plus the
+  active-dataset switch (`POST /data/active`).
+- Or from a shell: `curl -X POST http://localhost:8123/data/sample`
+  (assembles the `samples/` miniature and activates it in one call).
+
 Reset the database from scratch (deterministic — reruns yield identical
 row counts) without host Python, then restart the stack:
 
@@ -97,6 +110,28 @@ docker compose up -d
   `/health` keeps returning 200; the graph still runs end-to-end — the
   decider falls back to its deterministic heuristic transport and fill
   writes KPI-grounded copy instead of model text.
+
+### Metrics: metrics.yaml plus the two read legs
+
+Queryable metrics are compiled from `agent/semantics/metrics.yaml`
+(`net_new_arr`, `mrr`, `nrr`, `churn_rate`, `active_accounts`,
+`data_quality`, `gross_churned_arr`, `active_accounts_eom`). Two read-only
+HTTP legs serve them with no decider: the picker leg
+`GET /data/run?metric=&start=&end=&segment=` composes a validated layout,
+and `POST /data/query` serves both a metric spot-check
+(`{"metric", "start", "end"}` → `{"value"}` via the same compiler,
+`data_quality` returning the checks list verbatim) and the guarded SQL hatch
+(one leading-SELECT statement with a row cap) —
+`scripts/verify_data_slice.py` proves both legs agree with the
+NL answer within 1% and prints `parity: ok`.
+
+### Postgres second source
+
+`DATASOURCE_URL=postgresql://…` selects the read-only Postgres source
+(`agent/data/postgres_source.py`, same templates as the SQLite path): load
+the samples once with `DATASOURCE_URL=… scripts/load_postgres.sh`, restart
+the agent with the same `DATASOURCE_URL`, then prove parity with
+`python3 scripts/verify_data_slice.py --target postgres`.
 
 ### Sample datasets: unplanted random data
 
@@ -222,6 +257,9 @@ docker compose up -d --build
 agent's CORS preflight rejects the chat. `scripts/verify_demo.py` defaults
 to the 8123/5173 pair — override `AGENT_URL` and `WEB_URL` to match.
 
+Desktop note: the Tauri shell rides `SPA_ORIGIN` alongside the Vite dev
+origin, so the desktop build passes preflight with no code change.
+
 ## Demo script
 
 A 90-second tour of the three golden paths. Setup once (`cp agent/.env.example
@@ -277,6 +315,7 @@ The PRD §11 checklist is executable — no manual clicking required:
 ```bash
 docker compose up -d            # boot agent :8123 + web :5173 (empty by default — no dataset is generated at boot)
 python3 scripts/verify_demo.py  # 15 stdlib-only HTTP/state probes, exit 0 on green (needs a loaded DB: ./scripts/reset_data.sh first)
+python3 scripts/verify_data_slice.py --target sqlite  # release slice gate (issue #91): upload → triple-query parity → off-catalog safety, prints `parity: ok`
 ```
 
 The probe suite waits for the stack, runs the Q3 query once, then checks the Q3 path (`kpi_row` + `line_chart`
