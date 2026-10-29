@@ -122,3 +122,12 @@ export function barWidthPercent(p: number): string {
   const width = Math.min(100, Math.max(0, Math.round(p * 100)));
   return `${width}%`;
 }
+
+// Issue #87: flat probability text for the simplified decision-drawer row.
+// A finite number renders verbatim ("0.9"), anything else renders "n/a"
+// so a garbage scalar never crashes the row — the row still contains the
+// literal "p=" prefix the control-layer probes match on.
+export function formatProbability(p: number): string {
+  if (typeof p !== "number" || !Number.isFinite(p)) return "n/a";
+  return String(p);
+}

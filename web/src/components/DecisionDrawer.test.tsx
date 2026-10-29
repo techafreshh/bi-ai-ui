@@ -1,14 +1,16 @@
-// Acceptance-contract tests for the DecisionDrawer (issue #14).
+// Acceptance-contract tests for the DecisionDrawer (issue #14, simplified
+// row in issue #87).
 //
 // Pinned contract: the header "Decision log" button toggles a right-side
 // drawer (data-testid="decision-drawer") whose close control returns to the
-// closed state; a completed Q3 query renders >=2 decision entries, each
-// showing a percentage string ("90%"), a model string containing "pplx", and
-// a latency string matching /\d+ ms/; a record missing latency_ms renders
-// "n/a" without crashing; the union of two queries' decisions renders one
-// entry per streamed record — count equals the sum of both array lengths.
+// closed state; a completed Q3 query renders >=2 decision entries, each as
+// one flat text row containing the literal substrings "p=", "model", and
+// "latency" (scalar probabilities render as "p=<scalar>"); a record missing
+// latency_ms renders "n/a" without crashing; the empty drawer renders a
+// "no dataset" note; the union of two queries' decisions renders one entry
+// per streamed record — count equals the sum of both array lengths.
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DecisionDrawer } from "./DecisionDrawer";
 import type { DecisionRecord } from "../lib/decisions";
@@ -99,41 +101,49 @@ describe("DecisionDrawer (acceptance: open/close cycle)", () => {
     expect(drawer.getAttribute("aria-label")).toBe("Decision log");
   });
 
-  it("shows the empty state before any decision has streamed", () => {
+  it("shows the no dataset note before any decision has streamed", () => {
     render(<DecisionDrawer decisions={[]} />);
     fireEvent.click(screen.getByTestId("decision-log-button"));
-    expect(
-      screen.getByText("No decisions yet — send a query first."),
-    ).toBeTruthy();
+    expect(screen.getByText(/no dataset/)).toBeTruthy();
+    expect(console.error).not.toHaveBeenCalled();
   });
 });
 
-describe("DecisionDrawer (acceptance: Q3 query renders percent, model, latency)", () => {
-  it("renders >=2 decision entries with percentage, pplx model, and signed latency", () => {
+describe("DecisionDrawer (acceptance: flat p=/model/latency row)", () => {
+  it("renders >=2 decision entries whose text contains p=, model, and latency", () => {
     render(<DecisionDrawer decisions={Q3_DECISIONS} />);
     fireEvent.click(screen.getByTestId("decision-log-button"));
 
     const entries = screen.getAllByTestId("decision-entry");
     expect(entries.length).toBeGreaterThanOrEqual(2);
-
-    // Percentage strings, integer-rounded.
-    expect(screen.getAllByText("90%").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("85%").length).toBeGreaterThan(0);
-
-    // Model string passes through verbatim and contains "pplx" — the drawer
-    // never rewrites the agent's attribution.
+    for (const entry of entries) {
+      const text = entry.textContent ?? "";
+      expect(text).toContain("p=");
+      expect(text).toContain("model");
+      expect(text).toContain("latency");
+    }
+    // Model attribution passes through verbatim and keeps the pplx marker.
     for (const model of screen.getAllByTestId("decision-model")) {
       expect(model.textContent).toContain("pplx");
     }
-
-    // Latency strings match /\d+ ms/.
-    expect(screen.getAllByTestId("decision-latency").some(
-      (el) => /\d+ ms/.test(el.textContent ?? ""),
-    )).toBe(true);
+    // Latency strings match /\\d+ ms/.
+    expect(
+      screen
+        .getAllByTestId("decision-latency")
+        .some((el) => /\d+ ms/.test(el.textContent ?? "")),
+    ).toBe(true);
     expect(screen.getByText("232 ms")).toBeTruthy();
-
-    // The picked option and the noul answer's scalar label round the entry out.
+    // The picked option rounds the entry out.
     expect(screen.getByText("picked: kpi_row")).toBeTruthy();
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("renders a scalar probability as p=<scalar>", () => {
+    render(<DecisionDrawer decisions={Q3_DECISIONS} />);
+    fireEvent.click(screen.getByTestId("decision-log-button"));
+    const entries = screen.getAllByTestId("decision-entry");
+    // The second entry is the noul scalar 0.9.
+    expect(entries[1].textContent).toContain("p=0.9");
     expect(console.error).not.toHaveBeenCalled();
   });
 
@@ -144,33 +154,6 @@ describe("DecisionDrawer (acceptance: Q3 query renders percent, model, latency)"
     expect(latencies.some((el) => el.textContent === "n/a")).toBe(true);
     expect(latencies.some((el) => el.textContent === "232 ms")).toBe(true);
     expect(console.error).not.toHaveBeenCalled();
-  });
-
-  it("wires the kpi_row bar row: 90% cell with a sibling fill at width 90%", () => {
-    render(<DecisionDrawer decisions={Q3_DECISIONS} />);
-    fireEvent.click(screen.getByTestId("decision-log-button"));
-
-    const label = screen.getByText("kpi_row");
-    const row = label.closest("div");
-    if (!row) throw new Error("bar row not found");
-    const cell = within(row).getByTestId("decision-probability");
-    expect(cell.textContent).toBe("90%");
-    // The fill is the sibling track's child, sized by the probability.
-    const fill = cell.previousElementSibling?.querySelector(
-      '[data-testid="decision-bar-fill"]',
-    );
-    expect(fill).toBeTruthy();
-    expect((fill as HTMLElement).style.width).toBe("90%");
-  });
-
-  it("renders one probability row per option with a zero bar for 0 probabilities", () => {
-    render(<DecisionDrawer decisions={Q3_DECISIONS} />);
-    fireEvent.click(screen.getByTestId("decision-log-button"));
-    // The first entry carries all six catalog options, zeros included.
-    const firstEntry = screen.getAllByTestId("decision-entry")[0];
-    const cells = within(firstEntry).getAllByTestId("decision-probability");
-    expect(cells).toHaveLength(6);
-    expect(cells.some((el) => el.textContent === "0%")).toBe(true);
   });
 });
 
@@ -187,10 +170,16 @@ describe("DecisionDrawer (acceptance: union across two queries)", () => {
     );
     const entries = screen.getAllByTestId("decision-entry");
     expect(entries).toHaveLength(Q3_DECISIONS.length + SECOND_QUERY.length);
-    // Both runs' records are present, duplicates included.
+    // Both runs' records are present, duplicates included, each with the
+    // flat-row literals.
     expect(screen.getByText("#catalog_components")).toBeTruthy();
     expect(screen.getByText("#metric_focus")).toBeTruthy();
+    for (const entry of entries) {
+      expect(entry.textContent).toContain("p=");
+      expect(entry.textContent).toContain("model");
+      expect(entry.textContent).toContain("latency");
+    }
     expect(screen.getByText("41 ms")).toBeTruthy();
-    expect(screen.getByText("82%")).toBeTruthy();
+    expect(console.error).not.toHaveBeenCalled();
   });
 });
