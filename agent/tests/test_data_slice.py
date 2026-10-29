@@ -1,19 +1,21 @@
 """Slice parity contract tests (issue #91).
 
 The release verifier (`scripts/verify_data_slice.py`) proves triple-query
-parity live — NL churn total vs picker `GET /data/run` vs SQL
+parity live — NL churn total vs picker `GET /data/run` vs SQL/metric
 `POST /data/query` spot-check within 1%. These tests pin the same legs at
 the HTTP contract level over the shared session seed, without the network:
 
+- the metric leg POST {metric, start, end} equals
+  `queries.metric_value("gross_churned_arr", ...)` within 1e-9;
 - the SQL spot-check SELECT of churned cents equals
   `queries.metric_value("gross_churned_arr", ...)` within 1e-9;
 - the picker data_table mrr sum equals the SQL per-row mrr sum within
   1e-9 (same cohort, same rounding, same 50-row cap);
 - the validation matrix (unknown metric, bare dates, start-after-end) is
-  400 with the issue's substrings, and an unreadable DB is 400
-  `no active dataset` on both legs;
-- the SQL leg is read-only: repeated SELECTs and the datasets listing are
-  byte-identical before and after;
+  400 with the issue's substrings on the picker and metric legs, and an
+  unreadable DB is 400 `no active dataset` on every leg;
+- both query legs are read-only: repeated calls and the datasets listing
+  are byte-identical before and after;
 - the verifier's pure helpers (`within_pct`, `mrr_total`) hold their
   zero-base and junk-row contracts.
 """
@@ -67,6 +69,90 @@ def _run_table_mrr_sum(payload):
     ]
     assert tables, "picker metric must carry a data_table"
     return sum(row["mrr"] for row in tables[0]["props"]["rows"])
+
+
+def test_slice_metric_leg_matches_compiler(seeded_db):
+    """The metric leg POST {metric, start, end} equals the compiler's
+    gross_churned_arr value within 1e-9 — the read-only leg the verifier's
+    parity line spot-checks alongside the SQL hatch."""
+    response = client.post(
+        "/data/query",
+        json={"metric": "gross_churned_arr", "start": _START, "end": _END},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert set(payload) == {"metric", "start", "end", "value"}
+    assert payload["metric"] == "gross_churned_arr"
+    assert payload["start"] == _START
+    assert payload["end"] == _END
+    value = payload["value"]
+    assert isinstance(value, (int, float)) and not isinstance(value, bool)
+    expected = queries.metric_value("gross_churned_arr", _START, _END)
+    assert isinstance(expected, (int, float)) and not isinstance(expected, bool)
+    assert abs(value - expected) <= 1e-9
+
+
+def test_slice_metric_leg_400_matrix(seeded_db):
+    """Unknown metric, non-ISO dates and start-after-end are 400 with
+    the run-validation substrings on the metric leg."""
+    unknown = client.post(
+        "/data/query",
+        json={"metric": "bogus", "start": _START, "end": _END},
+    )
+    assert unknown.status_code == 400, unknown.text
+    assert "unknown metric" in unknown.json()["error"]
+    bad_date = client.post(
+        "/data/query",
+        json={"metric": "gross_churned_arr", "start": "2026-13-01", "end": _END},
+    )
+    assert bad_date.status_code == 400, bad_date.text
+    assert "not a valid ISO date" in bad_date.json()["error"]
+    flipped = client.post(
+        "/data/query",
+        json={"metric": "gross_churned_arr", "start": _END, "end": _START},
+    )
+    assert flipped.status_code == 400, flipped.text
+    assert "is after" in flipped.json()["error"]
+    missing = client.post("/data/query", json={"metric": "gross_churned_arr"})
+    assert missing.status_code == 400, missing.text
+    assert "error" in missing.json()
+
+
+def test_slice_metric_empty_db_is_400_no_active_dataset(monkeypatch, tmp_path):
+    """With no readable dataset the metric leg answers 400
+    `no active dataset` instead of a degraded number."""
+    missing = tmp_path / "missing.db"
+    monkeypatch.setattr(db, "DEFAULT_DB_PATH", missing)
+    monkeypatch.delenv("DB_PATH", raising=False)
+    monkeypatch.delenv("DATASOURCE_URL", raising=False)
+    saved_by_id = dict(datasets._BY_ID)
+    saved_active = datasets._ACTIVE_ID
+    datasets._BY_ID.clear()
+    datasets._ACTIVE_ID = None
+    try:
+        response = client.post(
+            "/data/query",
+            json={"metric": "gross_churned_arr", "start": _START, "end": _END},
+        )
+    finally:
+        datasets._BY_ID.clear()
+        datasets._BY_ID.update(saved_by_id)
+        datasets._ACTIVE_ID = saved_active
+    assert response.status_code == 400, response.text
+    assert "no active dataset" in response.json()["error"]
+
+
+def test_slice_metric_leg_is_read_only(seeded_db):
+    """The metric leg mutates nothing observable: a repeated metric call
+    is byte-identical and the datasets listing is unchanged."""
+    body = {"metric": "gross_churned_arr", "start": _START, "end": _END}
+    first = client.post("/data/query", json=body)
+    assert first.status_code == 200, first.text
+    listing_before = client.get("/data/datasets").json()
+    second = client.post("/data/query", json=body)
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+    assert client.get("/data/datasets").json() == listing_before
 
 
 def test_slice_sql_cents_match_metric_value(seeded_db):

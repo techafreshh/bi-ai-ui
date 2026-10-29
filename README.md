@@ -118,8 +118,11 @@ Queryable metrics are compiled from `agent/semantics/metrics.yaml`
 `data_quality`, `gross_churned_arr`, `active_accounts_eom`). Two read-only
 HTTP legs serve them with no decider: the picker leg
 `GET /data/run?metric=&start=&end=&segment=` composes a validated layout,
-and the SQL leg `POST /data/query` runs one leading-SELECT statement with
-a row cap — `scripts/verify_data_slice.py` proves both legs agree with the
+and `POST /data/query` serves both a metric spot-check
+(`{"metric", "start", "end"}` → `{"value"}` via the same compiler,
+`data_quality` returning the checks list verbatim) and the guarded SQL hatch
+(one leading-SELECT statement with a row cap) —
+`scripts/verify_data_slice.py` proves both legs agree with the
 NL answer within 1% and prints `parity: ok`.
 
 ### Postgres second source

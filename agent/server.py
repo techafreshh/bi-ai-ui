@@ -637,15 +637,22 @@ def create_app() -> FastAPI:
             content={"error": f"unknown dataset {dataset_id!r}"},
         )
 
-    # Guarded SQL escape hatch (issue #83): exactly one leading SELECT,
-    # capped rows, read-only connection. Sequential validation mirrors the
-    # /data/run style — body shape, single-statement (`;`), leading
-    # SELECT, blocked keywords, then the active-dataset probe — each a 400
-    # {"error"} before any I/O. The probe (issue #91, same
+    # Guarded SQL escape hatch (issue #83) plus read-only metric leg
+    # (issue #91): one route, two shapes. A JSON body carrying a `sql`
+    # string takes the SQL hatch — exactly one leading SELECT, capped rows,
+    # read-only connection. A body carrying `metric`/`start`/`end` takes
+    # the metric leg — the GET /data/run validation idiom (missing
+    # params, metric whitelist via queries._METRIC_FUNCS, ISO dates via
+    # date.fromisoformat, start-after-end, active-dataset probe) returning
+    # 200 {"metric", "start", "end", "value"} via
+    # queries.metric_value (the `data_quality` value is the checks list
+    # verbatim). Sequential validation mirrors the /data/run style and
+    # every failure is 400 {"error"} before any I/O (a malformed JSON
+    # body is 400, never 422). The active-dataset probe (same
     # queries.latest_event_date() try/except idiom as the /data/run
     # handler) turns every unreadable dataset — missing file, missing
     # tables, empty event history — into 400 "no active dataset" instead
-    # of leaking the raw sqlite error. Success runs wrapped as
+    # of leaking the raw sqlite error. SQL success runs wrapped as
     # SELECT * FROM (<sql>) LIMIT <cap> over db.connect_ro() (mode=ro URI
     # + SQL_TIMEOUT_S) and returns 200 {"columns", "rows"}; every sqlite
     # failure maps to 400 {"error"}.
@@ -655,7 +662,92 @@ def create_app() -> FastAPI:
             body = await request.json()
         except Exception:  # noqa: BLE001 - any unparseable body is 400
             body = None
-        sql = body.get("sql") if isinstance(body, dict) else None
+        if not isinstance(body, dict):
+            return JSONResponse(
+                status_code=400, content={"error": "missing sql"}
+            )
+        sql = body.get("sql")
+        has_metric_shape = (
+            "metric" in body or "start" in body or "end" in body
+        )
+        if has_metric_shape and (
+            not isinstance(sql, str) or not sql.strip()
+        ):
+            metric = body.get("metric")
+            start = body.get("start")
+            end = body.get("end")
+            if metric is None or not str(metric).strip():
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "missing required query parameter: metric"},
+                )
+            if start is None or not str(start).strip():
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "missing required query parameter: start"},
+                )
+            if end is None or not str(end).strip():
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "missing required query parameter: end"},
+                )
+            metric = str(metric).strip()
+            start = str(start).strip()
+            end = str(end).strip()
+            if metric not in queries._METRIC_FUNCS:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": (
+                            f"unknown metric {metric!r}; must be one of "
+                            f"{sorted(queries._METRIC_FUNCS)}"
+                        )
+                    },
+                )
+            try:
+                canon_start = date.fromisoformat(start).isoformat()
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": f"window start is not a valid ISO date: {start!r}"
+                    },
+                )
+            try:
+                canon_end = date.fromisoformat(end).isoformat()
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"window end is not a valid ISO date: {end!r}"},
+                )
+            if canon_start > canon_end:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": (
+                            f"window start {canon_start} is after "
+                            f"window end {canon_end}"
+                        )
+                    },
+                )
+            start, end = canon_start, canon_end
+            try:
+                queries.latest_event_date()
+            except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+                return JSONResponse(
+                    status_code=400, content={"error": "no active dataset"}
+                )
+            try:
+                value = queries.metric_value(metric, start, end)
+            except ValueError as exc:
+                return JSONResponse(
+                    status_code=400, content={"error": str(exc)}
+                )
+            except Exception:  # noqa: BLE001 - unreadable DB reads as empty
+                return JSONResponse(
+                    status_code=400, content={"error": "no active dataset"}
+                )
+            return {"metric": metric, "start": start, "end": end, "value": value}
         if not isinstance(sql, str) or not sql.strip():
             return JSONResponse(
                 status_code=400, content={"error": "missing sql"}
