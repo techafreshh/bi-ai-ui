@@ -73,6 +73,24 @@ def test_draw_me_a_dragon_renders_only_insight_text(seeded_db, monkeypatch):
     assert final_a2ui["slotCopy"]["summary"]
 
 
+def test_book_me_a_flight_to_mars_renders_only_insight_text(seeded_db, monkeypatch):
+    """'Book me a flight to Mars' under the default threshold(0.6) wiring:
+    the off-catalog guard empties the canvas, so the completed a2ui holds
+    exactly one insight_text item with a non-empty body — the streamed
+    wire never carries an untrusted component type."""
+    raw, snapshots = _run_sse(monkeypatch, message="Book me a flight to Mars")
+
+    assert "RUN_FINISHED" in raw
+    assert "RUN_ERROR" not in raw
+    final_a2ui = _final_state(snapshots)["a2ui"]
+    catalog.A2UILayout.model_validate(final_a2ui)
+    assert final_a2ui["v"] == 1
+    assert final_a2ui["layout"] == "grid"
+    assert len(final_a2ui["items"]) == 1
+    assert final_a2ui["items"][0]["type"] == "insight_text"
+    assert final_a2ui["items"][0]["props"]["body"]
+
+
 # --- Clause 1, determinism: a live decider's misjudgment cannot leak ---------
 
 
@@ -212,6 +230,42 @@ def test_missing_catalog_answer_falls_back_to_grid_single_insight(
     items = final_a2ui["items"]
     assert [item["type"] for item in items] == ["insight_text"]
     assert len(items) == 1
+    assert items[0]["props"]["body"]
+
+
+def test_forced_low_confidence_p02_cuts_probed_component(seeded_db, monkeypatch):
+    """A decider scoring every catalog component 0.2 (below the 0.6 line)
+    cuts the probed kpi_row id from the canvas: the final a2ui is the
+    single-insight_text fallback validated through catalog.A2UILayout."""
+    question_set = agent_graph.questions.build_question_set("Show me sales in Q3", {})
+    answers = {
+        question.id: {
+            "id": question.id,
+            "type": question.type,
+            "probabilities": (
+                {option: 0.2 for option in question.options}
+                if question.type == "choice"
+                else 0.2
+            ),
+        }
+        for question in question_set
+    }
+
+    def low_client():
+        return DecisionClient(MockTransport(answers=answers))
+
+    raw, snapshots = _run_sse(
+        monkeypatch, message="Show me sales in Q3", decision_client=low_client
+    )
+
+    assert "RUN_FINISHED" in raw
+    assert "RUN_ERROR" not in raw
+    final_a2ui = _final_state(snapshots)["a2ui"]
+    catalog.A2UILayout.model_validate(final_a2ui)
+    items = final_a2ui["items"]
+    assert len(items) == 1
+    assert items[0]["type"] == "insight_text"
+    assert "kpi_row" not in [item["type"] for item in items]
     assert items[0]["props"]["body"]
 
 

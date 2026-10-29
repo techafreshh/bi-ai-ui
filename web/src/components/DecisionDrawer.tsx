@@ -3,15 +3,30 @@
 // presentational: it owns only its open/closed state and renders the
 // accumulated `decisions[]` it is given verbatim (model and latency are the
 // agent's truthful attribution — never substituted or prettified here).
+// Issue #87: simplified to a flat per-decision text row containing the
+// literal substrings `p=`, `model`, and `latency` so the control layer is
+// observable as plain text instead of the bar-grid presentation.
 
 import { useState } from "react";
 import {
-  barWidthPercent,
   formatLatency,
-  formatPercent,
+  formatProbability,
   recordProbabilities,
   type DecisionRecord,
 } from "../lib/decisions";
+
+// One flat probability summary per record, always prefixed with the literal
+// `p=` the probes match on. Scalars render as `p=<scalar>`; dicts render
+// as `p=<option>=<value>, ...`; garbage renders as `p=n/a` — never a crash.
+function probabilityText(record: DecisionRecord): string {
+  const { probabilities } = record;
+  if (typeof probabilities === "number") {
+    return `p=${formatProbability(probabilities)}`;
+  }
+  const rows = recordProbabilities(record);
+  if (rows.length === 0) return "p=n/a";
+  return `p=${rows.map((row) => `${row.label}=${formatProbability(row.value)}`).join(", ")}`;
+}
 
 export function DecisionDrawer({ decisions }: { decisions: DecisionRecord[] }) {
   const [open, setOpen] = useState(false);
@@ -49,12 +64,11 @@ export function DecisionDrawer({ decisions }: { decisions: DecisionRecord[] }) {
           <div className="flex-1 overflow-y-auto px-4 py-3">
             {decisions.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No decisions yet — send a query first.
+                no dataset — send a query first.
               </p>
             ) : (
               <div className="space-y-3">
                 {decisions.map((record, index) => {
-                  const rows = recordProbabilities(record);
                   return (
                     <article
                       // ids recur across runs, so the index is part of the
@@ -70,48 +84,25 @@ export function DecisionDrawer({ decisions }: { decisions: DecisionRecord[] }) {
                           {record.type}
                         </span>
                       </div>
-                      <div className="space-y-1.5">
-                        {rows.map((row) => (
-                          <div
-                            key={row.label}
-                            className="flex items-center gap-2 text-xs"
-                          >
-                            <span className="w-16 shrink-0 truncate text-muted-foreground">
-                              {row.label}
-                            </span>
-                            <span className="h-2 flex-1 overflow-hidden rounded bg-muted">
-                              <span
-                                data-testid="decision-bar-fill"
-                                className="block h-full rounded bg-primary"
-                                style={{ width: barWidthPercent(row.value) }}
-                              />
-                            </span>
-                            <span
-                              data-testid="decision-probability"
-                              className="w-10 shrink-0 text-right font-medium text-foreground"
-                            >
-                              {formatPercent(row.value)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        picked: {String(record.pick ?? "n/a")}
-                      </p>
-                      <footer className="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                      <p className="text-xs text-foreground">
+                        {probabilityText(record)} model{" "}
                         <span
                           data-testid="decision-model"
                           className="min-w-0 truncate"
                         >
                           {String(record.model ?? "n/a")}
-                        </span>
+                        </span>{" "}
+                        latency{" "}
                         <span
                           data-testid="decision-latency"
                           className="shrink-0 tabular-nums"
                         >
                           {formatLatency(record.latency_ms)}
                         </span>
-                      </footer>
+                      </p>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        picked: {String(record.pick ?? "n/a")}
+                      </p>
                     </article>
                   );
                 })}

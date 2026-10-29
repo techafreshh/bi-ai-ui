@@ -13,6 +13,7 @@ import {
   decisionsFromState,
   formatLatency,
   formatPercent,
+  formatProbability,
   recordProbabilities,
   sameDecisions,
   type DecisionRecord,
@@ -136,6 +137,12 @@ describe("formats (percent, latency, bar width)", () => {
     expect(formatPercent(0.91)).toBe("91%");
     expect(formatPercent(0.902)).toBe("90%");
     expect(formatPercent(0)).toBe("0%");
+  });
+
+  it("formats a probability verbatim for the flat drawer row", () => {
+    expect(formatProbability(0.9)).toBe("0.9");
+    expect(formatProbability(0)).toBe("0");
+    expect(formatProbability(Number.NaN)).toBe("n/a");
   });
 
   it("rounds latency down to whole milliseconds with a unit", () => {
