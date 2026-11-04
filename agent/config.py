@@ -234,10 +234,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
             default=_DATASOURCE_URL_DEFAULT,
             required=False,
             purpose=(
-                "Alternate datasource URL (issue #79; empty = local "
-                "SQLite path resolution as today). A non-empty value is "
-                "validated for non-blankness only — Postgres wiring is "
-                "out of scope, SQLite remains the engine."
+                "Datasource URL (issue #79; empty = local "
+                "SQLite path resolution as today). A postgresql:// "
+                "value selects the read-only Postgres source "
+                "(scripts/load_postgres.sh loads the samples; "
+                "agent/data/postgres_source.py serves it)."
             ),
         ),
         EnvVar(
