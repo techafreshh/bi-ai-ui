@@ -2,7 +2,7 @@
 
 Chat with your business data: ask a question in plain English and the agent answers by composing a dashboard from a fixed catalog of pre-built components — it never invents markup.
 
-[Features](#features) • [Architecture](#architecture) • [Prerequisites](#prerequisites) • [Quickstart](#quickstart) • [Usage](#usage) • [Configuration](#configuration) • [Verification](#verification) • [Limitations](#limitations)
+[Features](#features) • [Architecture](#architecture) • [Prerequisites](#prerequisites) • [Quickstart](#quickstart) • [Usage](#usage) • [Environment](#environment) • [Verification](#verification) • [Limitations](#limitations)
 
 ![Q3 sales dashboard: KPI tiles and ARR trend chart](docs/screenshot-q3-dashboard.png)
 
@@ -138,7 +138,7 @@ To test the agent against data it was never staged for (organic growth, a seed-p
 
 The generator prints the drawn spike/bug windows so you know what to ask. The same seed always rebuilds the identical dataset.
 
-## Configuration
+## Environment
 
 Server-side only: copy `agent/.env.example` to `agent/.env` (gitignored) and restart the agent (`docker compose up -d agent`, no rebuild). Every value in the example equals the code default, so copying is behavior-neutral. Every variable below is read by `agent/` code (registry: `agent/config.py`).
 

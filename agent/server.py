@@ -17,66 +17,223 @@ import re
 import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
 import uuid
 from datetime import date
 from pathlib import Path
 
 
-def _bootstrap_via_uv_if_needed() -> None:
-    """Re-exec through `uv run` when the FastAPI stack is missing.
+def _project_dir() -> Path:
+    """Agent project dir: the folder holding this file and pyproject.toml."""
+    return Path(__file__).resolve().parent
+
+
+def _venv_site_dirs(project: Path) -> list:
+    """Site-packages dirs of a project-local `.venv` (PEP 405 layout).
+
+    Covers posix (`lib/pythonX.Y/site-packages`) and Windows
+    (`Lib/site-packages`) without assuming the interpreter version, so a
+    venv created by `uv sync` under any supported Python is found.
+    Returns only directories that exist right now."""
+    sites = []
+    for pattern in ("lib/python*/site-packages", "Lib/site-packages"):
+        for path in sorted(project.joinpath(".venv").glob(pattern)):
+            try:
+                if path.is_dir() and str(path) not in sites:
+                    sites.append(str(path))
+            except OSError:
+                continue
+    return sites
+
+
+def _find_uv() -> str | None:
+    """Locate a `uv` binary: PATH first, then well-known install spots."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    candidates = [Path("/usr/local/bin/uv"), Path("/root/.local/bin/uv")]
+    try:
+        candidates.append(Path.home() / ".local" / "bin" / "uv")
+    except Exception:  # noqa: BLE001 - unresolvable home; skip it
+        pass
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
+def _sync_project_env(project: Path, uv: str) -> bool:
+    """`uv sync --frozen` the agent project; True when it exits 0."""
+    try:
+        completed = subprocess.run(
+            [uv, "sync", "--frozen", "--project", str(project)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=240,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"bi-ai-ui: uv sync failed ({exc}); continuing", file=sys.stderr)
+        return False
+    if completed.returncode != 0:
+        tail = completed.stdout.decode("utf-8", "replace")[-2000:]
+        print(
+            f"bi-ai-ui: uv sync exited {completed.returncode}: {tail}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _project_dependencies(project: Path) -> list:
+    """Requirement strings from the project's pyproject `[project]` table.
+
+    Single source of truth stays pyproject.toml: tomllib on modern Pythons
+    with a small quoted-string fallback for older ones. Empty when the
+    file is unreadable, so callers fall through loudly instead of
+    installing a guessed set."""
+    text = None
+    try:
+        text = (project / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        import tomllib  # noqa: F401
+    except ImportError:
+        tomllib = None  # noqa: F811
+    if tomllib is not None:
+        try:
+            data = tomllib.loads(text)
+        except Exception:  # noqa: BLE001 - malformed table; fall through
+            return []
+        deps = data.get("project", {}).get("dependencies", [])
+        return [str(dep) for dep in deps if str(dep).strip()]
+    match = re.search(
+        r"dependencies\s*=\s*\[(.*?)\]", text, re.DOTALL
+    )
+    if not match:
+        return []
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def _pip_install_deps(project: Path, deps: list) -> bool:
+    """Last-resort `pip install` of the pyproject deps into this interpreter.
+
+    Only used when `uv` is unavailable: Debian's externally-managed
+    interpreters refuse installs without `--break-system-packages`, while
+    older pips reject the flag, so try with it and retry without."""
+    if not deps:
+        return False
+    base = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--quiet",
+        "--disable-pip-version-check",
+    ]
+    for extra in (["--break-system-packages"], []):
+        try:
+            completed = subprocess.run(
+                [*base, *extra, *deps],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=240,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(
+                f"bi-ai-ui: pip install failed ({exc}); continuing",
+                file=sys.stderr,
+            )
+            return False
+        if completed.returncode == 0:
+            return True
+        tail = completed.stdout.decode("utf-8", "replace")[-1200:]
+        if "break-system-packages" not in tail:
+            print(
+                f"bi-ai-ui: pip install exited {completed.returncode}: {tail}",
+                file=sys.stderr,
+            )
+            return False
+    return False
+
+
+def _bootstrap_serving_deps_if_needed() -> None:
+    """Self-heal the serving stack when launched on a bare interpreter.
 
     Factory harnesses launch the agent with the bare system python
     (`/usr/bin/python3 server.py --port ...`), which has no third-party
-    packages. The repo's canonical env is the agent venv (`uv sync`);
-    when FastAPI is unimportable and `uv` exists, re-exec the same argv
-    under `uv run --project <agent_dir>` so the launch self-heals instead
-    of dying with `No module named uvicorn`. Only acts when this file is
-    the entry point (`python server.py ...`): plain imports (`import
-    server`, `uvicorn agent.server:app`) never re-exec, so test harnesses
-    keep the normal ImportError. Guarded by `_BI_AI_UI_BOOTSTRAPPED`
-    against re-exec loops; when `uv` is absent (or this is not the agent
-    project) fall through to the normal ImportError so the missing
-    dependency stays visible."""
-    if __name__ != "__main__":
-        return
-    if os.getenv("_BI_AI_UI_BOOTSTRAPPED"):
-        return
+    packages. The repo's canonical env is the agent venv (`uv sync`); when
+    the serving imports fail, heal in-process so every launch style keeps
+    working — script (`python server.py`), module (`python -m ...`), or
+    plain import: reuse an existing project `.venv` when one is on disk,
+    else `uv sync --frozen` one (same lockfile the Docker build uses),
+    else pip-install the pyproject dependency list. Each step re-checks
+    the imports, so a healed interpreter continues normally with no
+    re-exec and no argv handling; when every step fails, fall through to
+    the normal ImportError so the missing dependency stays visible (with
+    a stderr line saying which healers were tried). No new environment
+    variables are read here — the env contract (agent/config.py) is
+    untouched."""
     try:
+        import dotenv  # noqa: F401
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
         return
     except ImportError:
         pass
-    uv = shutil.which("uv")
-    if uv is None:
-        for candidate in ("/usr/local/bin/uv", "/root/.local/bin/uv"):
-            if Path(candidate).is_file():
-                uv = candidate
-                break
-    if uv is None:
-        return
-    project = Path(__file__).resolve().parent
+    project = _project_dir()
     if not (project / "pyproject.toml").is_file():
         return
-    env = dict(os.environ)
-    env["_BI_AI_UI_BOOTSTRAPPED"] = "1"
-    argv = [
-        uv,
-        "run",
-        "--project",
-        str(project),
-        "python",
-        str(Path(__file__).resolve()),
-        *sys.argv[1:],
-    ]
+    tried = []
+    for site_dir in _venv_site_dirs(project):
+        if site_dir not in sys.path:
+            sys.path.insert(0, site_dir)
     try:
-        os.execvpe(uv, argv, env)
-    except OSError:
+        import dotenv  # noqa: F401
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
         return
+    except ImportError:
+        pass
+    tried.append("existing-.venv")
+    uv = _find_uv()
+    if uv is not None and _sync_project_env(project, uv):
+        for site_dir in _venv_site_dirs(project):
+            if site_dir not in sys.path:
+                sys.path.insert(0, site_dir)
+        try:
+            import dotenv  # noqa: F401
+            import fastapi  # noqa: F401
+            import uvicorn  # noqa: F401
+            return
+        except ImportError:
+            pass
+    tried.append("uv-sync" if uv is not None else "uv-missing")
+    if uv is None:
+        deps = _project_dependencies(project)
+        if deps and _pip_install_deps(project, deps):
+            try:
+                import dotenv  # noqa: F401
+                import fastapi  # noqa: F401
+                import uvicorn  # noqa: F401
+                return
+            except ImportError:
+                pass
+        tried.append("pip-install")
+    print(
+        f"bi-ai-ui: serving deps still missing after ({', '.join(tried)}); "
+        "install the agent venv (`uv sync --frozen --project agent`) ",
+        file=sys.stderr,
+    )
 
 
-_bootstrap_via_uv_if_needed()
+_bootstrap_serving_deps_if_needed()
 
 from dotenv import load_dotenv  # noqa: E402
 
