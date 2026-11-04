@@ -4,7 +4,7 @@
 # interface (never raw SQL), so reruns yield identical row counts
 # (SEED determinism). Host Python is never required. Run from the repo
 # root; may briefly stop the stack. Usage:
-#   ./scripts/reset_data.sh [--restart]
+#   ./scripts/reset_data.sh [--restart] [--profile seeded|random] [--seed N]
 set -eu
 
 # Resolve the repo root from this script's location, never the cwd
